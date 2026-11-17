@@ -1,0 +1,165 @@
+.shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 16px;
+  cursor: grab;
+}
+
+.dragging .shell {
+  cursor: grabbing;
+}
+
+.clock {
+  width: 108px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  font-size: 23px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: opacity 0.25s var(--ease);
+}
+
+.clock span[data-unit] {
+  border-radius: 4px;
+  transition: background-color 0.2s var(--ease);
+}
+
+.idle .clock span[data-unit]:hover {
+  background: var(--fill-hover);
+  cursor: ns-resize;
+}
+
+.colon {
+  opacity: 0.55;
+}
+
+.running .colon {
+  animation: tick 1s steps(1, end) infinite;
+}
+
+@keyframes tick {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+input.clock {
+  border-radius: 6px;
+  background: var(--field);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.35);
+  padding: 2px 4px;
+  margin-left: -4px;
+  cursor: text;
+  animation: rise 0.25s var(--ease) both;
+}
+
+.paused .clock {
+  opacity: 0.6;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.play {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  margin-right: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111114;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 2px 10px rgba(0, 0, 0, 0.2);
+  transition: background-color 0.2s var(--ease);
+}
+
+.play:hover {
+  background: #fff;
+}
+
+.play svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+}
+
+.play .go {
+  fill: currentColor;
+  stroke-width: 1.5;
+}
+
+.play .hold,
+.running .play .go {
+  display: none;
+}
+
+.running .play .hold {
+  display: block;
+}
+
+.controls .icon {
+  width: 26px;
+  height: 26px;
+}
+
+/* A hairline along the bottom shows how much time is left. */
+.track {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.3s var(--ease);
+}
+
+.counting .track {
+  opacity: 1;
+}
+
+.track i {
+  display: block;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.85);
+  transform-origin: left;
+  transform: scaleX(1);
+  transition: transform 0.25s linear;
+}
+
+/* Time's up: the glass glows softly until you reset. */
+.done .shell {
+  animation: glow 1.6s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.6),
+      inset 0 0 22px rgba(255, 255, 255, 0.22);
+  }
+}

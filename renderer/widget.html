@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'" />
+    <title>ScreenSage</title>
+    <link rel="stylesheet" href="glass.css" />
+    <link rel="stylesheet" href="widget.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="bar" id="bar">
+        <div class="group">
+          <button id="frameBtn" class="icon" title="Frame" aria-label="Show or hide the frame">
+            <svg viewBox="0 0 16 16"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" /></svg>
+          </button>
+          <button id="selectBtn" class="icon" title="Draw a new area" aria-label="Draw a new area">
+            <svg viewBox="0 0 16 16"><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3" /><circle cx="8" cy="8" r="2" /></svg>
+          </button>
+          <button id="timerBtn" class="icon" title="Timer" aria-label="Timer">
+            <svg viewBox="0 0 16 16"><circle cx="8" cy="9" r="5.25" /><path d="M8 6.25V9l1.75 1.25M6.5 1.75h3M12.4 3.9l.85-.85" /></svg>
+          </button>
+        </div>
+        <div class="group">
+          <button id="historyBtn" class="icon" title="Recents" aria-label="Recents">
+            <svg viewBox="0 0 16 16"><path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.8M2.75 2.75v2.5h2.5M8 5.25V8l1.9 1.2" /></svg>
+          </button>
+          <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6" /><circle cx="10" cy="5" r="1.5" /><circle cx="6" cy="11" r="1.5" /></svg>
+          </button>
+          <button id="closeBtn" class="icon" title="Close" aria-label="Close">
+            <svg viewBox="0 0 16 16"><path d="M5 5l6 6M11 5l-6 6" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <section id="view-answer" class="view">
+        <div class="inner"><div id="thread" class="thread"></div></div>
+      </section>
+
+      <section id="view-history" class="view" hidden>
+        <div class="inner"><div id="historyList" class="history"></div></div>
+      </section>
+
+      <section id="view-settings" class="view" hidden>
+        <div class="inner">
+          <div class="tabs" id="tabs" role="tablist">
+            <span class="chip" id="tabChip"></span>
+            <button role="tab" data-tab="model" class="on">Model</button>
+            <button role="tab" data-tab="frame">Frame</button>
+            <button role="tab" data-tab="general">General</button>
+            <button role="tab" data-tab="storage">Storage</button>
+          </div>
+
+          <div class="panel" data-panel="model">
+            <div class="list">
+              <label class="item">
+                <span>Provider</span>
+                <select id="provider"></select>
+              </label>
+              <label class="item" id="urlRow">
+                <span>Address</span>
+                <input id="baseUrl" type="text" spellcheck="false" autocomplete="off" />
+              </label>
+              <label class="item" id="keyRow">
+                <span>API key</span>
+                <input id="key" type="password" spellcheck="false" autocomplete="off" />
+              </label>
+              <div class="item">
+                <span>Model</span>
+                <select id="model"></select>
+                <button id="refresh" class="mini" title="Refresh" aria-label="Refresh models">
+                  <svg viewBox="0 0 16 16"><path d="M13.25 8a5.25 5.25 0 1 1-1.55-3.7M13.25 2.75v2.5h-2.5" /></svg>
+                </button>
+              </div>
+            </div>
+            <div class="links" id="keyLinks">
+              <button id="keyLink" class="link">Get a key</button>
+              <button id="removeKey" class="link">Remove key</button>
+            </div>
+            <p id="aiNote" class="error-line" hidden></p>
+            <div class="list">
+              <label class="item">
+                <span>Show thinking</span>
+                <input type="checkbox" class="switch" data-pref="answers.think" />
+              </label>
+            </div>
+          </div>
+
+          <div class="panel" data-panel="frame" hidden>
+            <div class="list">
+              <label class="item">
+                <span>Show frame</span>
+                <input type="checkbox" class="switch" id="frameShown" />
+              </label>
+              <label class="item">
+                <span>Shade outside</span>
+                <input type="checkbox" class="switch" data-pref="frameStyle.shade" />
+              </label>
+              <label class="item">
+                <span>Shade</span>
+                <input type="range" min="15" max="75" step="1" data-pref="frameStyle.shadeStrength" />
+              </label>
+            </div>
+            <div class="list">
+              <button class="item action" id="drawArea">Draw a new area</button>
+              <button class="item action" id="resetPositions">Reset positions</button>
+            </div>
+          </div>
+
+          <div class="panel" data-panel="general" hidden>
+            <div class="list">
+              <div class="item">
+                <span>Shortcut</span>
+                <button id="hotkey" class="keycap"></button>
+              </div>
+              <label class="item">
+                <span>Start with Windows</span>
+                <input type="checkbox" class="switch" data-pref="behaviour.launchAtLogin" />
+              </label>
+              <label class="item">
+                <span>Keep in tray when closed</span>
+                <input type="checkbox" class="switch" data-pref="behaviour.closeToTray" />
+              </label>
+            </div>
+          </div>
+
+          <div class="panel" data-panel="storage" hidden>
+            <div class="list">
+              <div class="item">
+                <span>Recents</span>
+                <span class="value" id="recentsInfo"></span>
+              </div>
+              <label class="item">
+                <span>Keep recents</span>
+                <input type="checkbox" class="switch" data-pref="answers.saveHistory" />
+              </label>
+              <button class="item action" id="clearRecents">Clear recents</button>
+            </div>
+            <div class="list">
+              <div class="item">
+                <span>All local data</span>
+                <span class="value" id="totalInfo"></span>
+              </div>
+              <button class="item action danger" id="deleteAll">Delete all local data</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div id="toast" class="toast" hidden></div>
+
+      <footer id="footer">
+        <form id="compose" class="compose" hidden>
+          <input id="question" type="text" placeholder="Ask a follow-up" autocomplete="off" />
+          <button id="send" class="send" title="Send" aria-label="Send">
+            <svg viewBox="0 0 16 16"><path d="M8 12.5v-9M4.5 7 8 3.5 11.5 7" /></svg>
+          </button>
+        </form>
+        <button id="ask" class="primary"><span id="askLabel">Answer</span></button>
+      </footer>
+    </div>
+    <script src="widget.js"></script>
+  </body>
+</html>

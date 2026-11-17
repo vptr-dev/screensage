@@ -1,0 +1,46 @@
+{
+  "name": "screensage",
+  "productName": "ScreenSage",
+  "version": "1.0.0",
+  "description": "Answers whatever question is inside the frame on your screen.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "app.screensage.desktop",
+    "productName": "ScreenSage",
+    "files": [
+      "main.js",
+      "preload.js",
+      "providers.js",
+      "renderer/**/*",
+      "assets/icon.png"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ScreenSage",
+      "uninstallDisplayName": "ScreenSage",
+      "include": "assets/installer.nsh",
+      "artifactName": "ScreenSage Setup.${ext}"
+    }
+  }
+}

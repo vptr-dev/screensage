@@ -1,0 +1,310 @@
+:root {
+  --shade: 0.4;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  font: 500 11.5px/1 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The whole overlay fades in and out instead of popping. */
+body {
+  opacity: 0;
+  transition:
+    opacity 0.28s var(--ease),
+    background-color 0.28s var(--ease);
+}
+
+body.on {
+  opacity: 1;
+}
+
+/* Drawing a new area: the whole screen dims until you start dragging. */
+body.selecting {
+  cursor: crosshair;
+}
+
+body.blank {
+  background-color: rgba(0, 0, 0, var(--shade));
+}
+
+body.blank #hole,
+body.selecting #bar,
+body.selecting .bracket,
+body.selecting .pill,
+body.selecting .hit {
+  display: none;
+}
+
+/* The capture area. Everything drawn here sits outside its edges. */
+#hole {
+  position: absolute;
+  box-shadow: 0 0 0 200vmax rgba(0, 0, 0, 0);
+  transition: box-shadow 0.3s var(--ease);
+}
+
+body.shade #hole {
+  box-shadow: 0 0 0 200vmax rgba(0, 0, 0, var(--shade));
+}
+
+/* Glass edge: a fine gradient line, bright at two corners and fading between. */
+#rim,
+#glow {
+  position: absolute;
+  inset: -3px;
+  border-radius: 7px;
+  pointer-events: none;
+}
+
+#rim {
+  padding: 1.5px;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0.32) 38%,
+    rgba(255, 255, 255, 0.32) 62%,
+    rgba(255, 255, 255, 0.9)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+#glow {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.3),
+    0 0 18px rgba(255, 255, 255, 0.18),
+    0 14px 40px rgba(0, 0, 0, 0.2);
+}
+
+/* Corner brackets and edge bars show where to grab. */
+.bracket {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 0 solid #fff;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+  pointer-events: none;
+}
+.bracket.nw {
+  left: -7px;
+  top: -7px;
+  border-width: 3px 0 0 3px;
+  border-top-left-radius: 9px;
+}
+.bracket.ne {
+  right: -7px;
+  top: -7px;
+  border-width: 3px 3px 0 0;
+  border-top-right-radius: 9px;
+}
+.bracket.sw {
+  left: -7px;
+  bottom: -7px;
+  border-width: 0 0 3px 3px;
+  border-bottom-left-radius: 9px;
+}
+.bracket.se {
+  right: -7px;
+  bottom: -7px;
+  border-width: 0 3px 3px 0;
+  border-bottom-right-radius: 9px;
+}
+
+.pill {
+  position: absolute;
+  background: #fff;
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transition: transform 0.2s var(--ease);
+}
+.pill.n,
+.pill.s {
+  left: 50%;
+  width: 28px;
+  height: 3px;
+  margin-left: -14px;
+}
+.pill.e,
+.pill.w {
+  top: 50%;
+  width: 3px;
+  height: 28px;
+  margin-top: -14px;
+}
+.pill.n {
+  top: -7px;
+}
+.pill.s {
+  bottom: -7px;
+}
+.pill.e {
+  right: -7px;
+}
+.pill.w {
+  left: -7px;
+}
+
+/* The bar you are about to grab stretches a little. */
+body:has(.edge.n:hover) .pill.n,
+body:has(.edge.s:hover) .pill.s {
+  transform: scaleX(1.35);
+}
+body:has(.edge.e:hover) .pill.e,
+body:has(.edge.w:hover) .pill.w {
+  transform: scaleY(1.35);
+}
+
+/* Invisible grab areas, much wider than what is drawn. */
+.hit {
+  position: absolute;
+}
+.edge.n,
+.edge.s {
+  left: 16px;
+  right: 16px;
+  height: 20px;
+  cursor: ns-resize;
+}
+.edge.e,
+.edge.w {
+  top: 16px;
+  bottom: 16px;
+  width: 20px;
+  cursor: ew-resize;
+}
+.edge.n {
+  top: -15px;
+}
+.edge.s {
+  bottom: -15px;
+}
+.edge.e {
+  right: -15px;
+}
+.edge.w {
+  left: -15px;
+}
+.corner {
+  width: 32px;
+  height: 32px;
+}
+.corner.nw {
+  left: -17px;
+  top: -17px;
+  cursor: nwse-resize;
+}
+.corner.se {
+  right: -17px;
+  bottom: -17px;
+  cursor: nwse-resize;
+}
+.corner.ne {
+  right: -17px;
+  top: -17px;
+  cursor: nesw-resize;
+}
+.corner.sw {
+  left: -17px;
+  bottom: -17px;
+  cursor: nesw-resize;
+}
+
+/* Toolbar: a small glass capsule above the frame. Drag it to move the frame. */
+#bar {
+  position: absolute;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 3px 0 9px;
+  color: #fff;
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.04)),
+    rgba(20, 20, 24, 0.62);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 8px 24px rgba(0, 0, 0, 0.28);
+  cursor: grab;
+  white-space: nowrap;
+}
+
+body.dragging,
+body.dragging #bar {
+  cursor: grabbing;
+}
+
+.grip {
+  width: 8px;
+  height: 12px;
+  fill: rgba(255, 255, 255, 0.5);
+}
+
+#size {
+  min-width: 64px;
+  color: rgba(255, 255, 255, 0.82);
+  font-variant-numeric: tabular-nums;
+}
+
+.sep {
+  width: 0.5px;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.24);
+}
+
+#bar button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  transition:
+    background-color 0.18s var(--ease),
+    color 0.18s var(--ease);
+}
+
+#bar button:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+#bar svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+#shadeBtn .half {
+  fill: currentColor;
+  stroke: none;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+}
+
+#shadeBtn.on {
+  color: #fff;
+}
+
+#shadeBtn.on .half {
+  opacity: 1;
+}

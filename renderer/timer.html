@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+    <title>Timer</title>
+    <link rel="stylesheet" href="glass.css" />
+    <link rel="stylesheet" href="timer.css" />
+  </head>
+  <body>
+    <div class="shell" id="shell">
+      <div class="clock" id="clock" title="Click to set, scroll to adjust">
+        <span id="hours" data-unit="h" hidden></span><span class="colon" id="hoursColon" hidden>:</span><span id="minutes" data-unit="m"></span><span class="colon">:</span><span id="seconds" data-unit="s"></span>
+      </div>
+      <input id="edit" class="clock" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" hidden />
+      <div class="controls">
+        <button id="play" class="play" title="Start" aria-label="Start">
+          <svg class="go" viewBox="0 0 16 16"><path d="M5.5 3.75v8.5L12 8z" /></svg>
+          <svg class="hold" viewBox="0 0 16 16"><path d="M5.5 4v8M10.5 4v8" /></svg>
+        </button>
+        <button id="reset" class="icon" title="Reset" aria-label="Reset">
+          <svg viewBox="0 0 16 16"><path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.8M2.75 2.75v2.5h2.5" /></svg>
+        </button>
+        <button id="close" class="icon" title="Close" aria-label="Close">
+          <svg viewBox="0 0 16 16"><path d="M5 5l6 6M11 5l-6 6" /></svg>
+        </button>
+      </div>
+      <div class="track"><i id="progress"></i></div>
+    </div>
+    <script src="timer.js"></script>
+  </body>
+</html>

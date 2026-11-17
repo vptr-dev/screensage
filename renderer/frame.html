@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+    <title>Frame</title>
+    <link rel="stylesheet" href="frame.css" />
+  </head>
+  <body>
+    <div id="hole">
+      <div id="glow"></div>
+      <div id="rim"></div>
+      <i class="bracket nw"></i><i class="bracket ne"></i><i class="bracket sw"></i><i class="bracket se"></i>
+      <i class="pill n"></i><i class="pill s"></i><i class="pill e"></i><i class="pill w"></i>
+      <div class="hit edge n" data-mode="n"></div>
+      <div class="hit edge s" data-mode="s"></div>
+      <div class="hit edge e" data-mode="e"></div>
+      <div class="hit edge w" data-mode="w"></div>
+      <div class="hit corner nw" data-mode="nw"></div>
+      <div class="hit corner ne" data-mode="ne"></div>
+      <div class="hit corner sw" data-mode="sw"></div>
+      <div class="hit corner se" data-mode="se"></div>
+    </div>
+
+    <div id="bar" data-mode="move">
+      <svg class="grip" viewBox="0 0 10 14" aria-hidden="true">
+        <circle cx="3" cy="3" r="1.1" /><circle cx="7" cy="3" r="1.1" /><circle cx="3" cy="7" r="1.1" />
+        <circle cx="7" cy="7" r="1.1" /><circle cx="3" cy="11" r="1.1" /><circle cx="7" cy="11" r="1.1" />
+      </svg>
+      <span id="size"></span>
+      <span class="sep"></span>
+      <button data-action="select" title="Draw a new area" aria-label="Draw a new area">
+        <svg viewBox="0 0 16 16"><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3" /><circle cx="8" cy="8" r="2" /></svg>
+      </button>
+      <button id="shadeBtn" data-action="shade" title="Shade outside" aria-label="Shade outside">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" /><path class="half" d="M8 2.5a5.5 5.5 0 0 0 0 11z" /></svg>
+      </button>
+      <button data-action="hide" title="Hide" aria-label="Hide">
+        <svg viewBox="0 0 16 16"><path d="M5 5l6 6M11 5l-6 6" /></svg>
+      </button>
+    </div>
+    <script src="frame.js"></script>
+  </body>
+</html>
