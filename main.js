@@ -56,23 +56,46 @@ const systemPrompt = (explain) =>
     'Write maths in plain text (x^2, sqrt(2), 3/4), never LaTeX or dollar signs.',
   ].join('\n');
 
-const FILL_ROUNDS = 6;
-const fillPrompt = (answer) =>
+const FILL_ROUNDS = 5;
+const KIND_NAMES = {
+  edit: 'text box', radiobutton: 'option', checkbox: 'checkbox', combobox: 'dropdown', listitem: 'list item',
+  button: 'button', hyperlink: 'link', text: 'text', slider: 'slider', spinner: 'number box', treeitem: 'item', dataitem: 'item',
+};
+// Buttons that would hand the answer in. Fill in never presses these.
+const SUBMIT_WORDS = /\b(submit|next|finish|check|send|done|continue|save|turn in|hand in)\b/i;
+
+function describeElement(e, index) {
+  let line = `${index + 1}. ${KIND_NAMES[e.type] || e.type} "${e.name}"`;
+  if (e.type === 'edit' || e.type === 'combobox' || e.type === 'spinner') line += ` holding "${e.value}"`;
+  if (e.state) line += ` (${e.state})`;
+  return line;
+}
+
+const fillPrompt = (answer, elements) =>
   [
     'You are entering an answer into the question shown in this screen capture, using the mouse and keyboard.',
     `The answer to enter:\n${answer}`,
-    'Positions are on a 0 to 1000 grid over the capture: x across from the left edge, y down from the top edge.',
-    'Reply with JSON only, nothing else: {"actions": [...], "done": true or false}',
-    'Actions you can use:',
-    '{"type": "click", "x": 0-1000, "y": 0-1000}  click an option, checkbox, text box or dropdown (aim for its centre)',
-    '{"type": "type", "text": "..."}  type into the box that was just clicked',
-    '{"type": "key", "key": "enter" | "tab" | "backspace" | "selectall" | "down" | "up"}',
-    '{"type": "drag", "from": {"x": .., "y": ..}, "to": {"x": .., "y": ..}}  drag an item to where it belongs',
-    'Rules:',
-    '- Only enter the answer. Never press submit, next, check, finish or similar buttons.',
-    '- If a text box already holds something, click it and use selectall before typing.',
-    '- If a dropdown or list has to open first, only click it and set done to false: you will get a new capture to pick from.',
-    '- After each reply you get a new capture. Set done to true when the answer is fully entered, or with no actions if it already is or nothing can be filled in.',
+    ...(elements.length
+      ? [
+          'These are the things inside the capture you can use, by number:',
+          ...elements.map(describeElement),
+          'Reply with commands only, one per line, nothing else:',
+          'click N        click thing N (an option, checkbox or list item)',
+          'type N text    put text into text box N (it replaces what is there)',
+          'choose N text  pick the entry called text in dropdown N',
+          'drag N M       drag thing N onto thing M',
+        ]
+      : [
+          'Positions are on a 0 to 1000 grid over the capture: x across from the left edge, y down from the top edge.',
+          'Reply with commands only, one per line, nothing else:',
+          'click X Y      click at that position (aim for the centre of the option or box)',
+          'type text      type into the box that was just clicked',
+          'drag X1 Y1 X2 Y2   drag from one position to another',
+        ]),
+    'key enter      press a key: enter, tab, down or up',
+    'look           stop and get a new capture first (for example after opening a custom list)',
+    'done           the answer is fully entered',
+    'Rules: only enter the answer, never press submit, next, check or finish. Leave options that are already right alone. Use the answer exactly as given.',
   ].join('\n');
 
 const DEFAULTS = {
@@ -975,16 +998,32 @@ function latestAnswer() {
   return (match ? match[1] : last.content.split(/\n\s*\n/)[0]).trim();
 }
 
-function readPlan(reply) {
-  const start = reply.indexOf('{');
-  const end = reply.lastIndexOf('}');
-  if (start < 0 || end < start) return { actions: [], done: true };
-  try {
-    const plan = JSON.parse(reply.slice(start, end + 1));
-    return { actions: Array.isArray(plan.actions) ? plan.actions.slice(0, 12) : [], done: plan.done !== false };
-  } catch {
-    return { actions: [], done: true };
+const unquote = (s) => s.trim().replace(/^["'“‘](.*)["'”’]$/, '$1');
+
+/** Read the model's commands, one per line. Anything it can't follow is skipped. */
+function readCommands(reply, count) {
+  const actions = [];
+  let look = false;
+  const id = (n) => {
+    const i = Number(n) - 1;
+    return i >= 0 && i < count ? i : null;
+  };
+  for (const raw of reply.split('\n')) {
+    const line = raw.replace(/[`*]/g, '').replace(/^\s*(?:[-•>]|\d+[.)])\s+/, '').trim();
+    let m;
+    if (/^look\b/i.test(line)) look = true;
+    else if (count && (m = line.match(/^click\s+#?(\d+)\s*$/i)) && id(m[1]) !== null) actions.push({ type: 'click', target: id(m[1]) });
+    else if (count && (m = line.match(/^type\s+#?(\d+)\s+(.+)$/i)) && id(m[1]) !== null) actions.push({ type: 'type', target: id(m[1]), text: unquote(m[2]) });
+    else if (count && (m = line.match(/^choose\s+#?(\d+)\s+(.+)$/i)) && id(m[1]) !== null) actions.push({ type: 'choose', target: id(m[1]), text: unquote(m[2]) });
+    else if (count && (m = line.match(/^drag\s+#?(\d+)\s+(?:on(?:to)?\s+|to\s+)?#?(\d+)\s*$/i)) && id(m[1]) !== null && id(m[2]) !== null) {
+      actions.push({ type: 'drag', from: id(m[1]), to: id(m[2]) });
+    } else if (!count && (m = line.match(/^click\s+(\d+)[\s,]+(\d+)\s*$/i))) actions.push({ type: 'click', at: { x: +m[1], y: +m[2] } });
+    else if (!count && (m = line.match(/^type\s+(.+)$/i))) actions.push({ type: 'type', text: unquote(m[1]) });
+    else if (!count && (m = line.match(/^drag\s+(\d+)[\s,]+(\d+)[\s,]+(?:to\s+)?(\d+)[\s,]+(\d+)\s*$/i))) {
+      actions.push({ type: 'drag', fromAt: { x: +m[1], y: +m[2] }, toAt: { x: +m[3], y: +m[4] } });
+    } else if ((m = line.match(/^key\s+(enter|tab|down|up)\b/i))) actions.push({ type: 'key', key: m[1].toLowerCase() });
   }
+  return { actions: actions.slice(0, 16), look };
 }
 
 /** A point on the 0–1000 grid of the capture, as a real screen pixel. */
@@ -994,24 +1033,42 @@ function gridToScreen(rect, point) {
   return screen.dipToScreenPoint({ x: rect.x + (gx / 1000) * rect.width, y: rect.y + (gy / 1000) * rect.height });
 }
 
-async function perform(action, rect, signal) {
+async function clickAt(p) {
+  await input.move(p.x, p.y);
+  await wait(120);
+  await input.down();
+  await input.up();
+}
+
+/** Run one command. Elements carry real screen pixels; grid points are mapped from the frame. */
+async function perform(action, rect, elements, signal) {
   const check = () => {
     if (signal.aborted) throw Object.assign(new Error('stopped'), { code: 'aborted' });
   };
   check();
+  const target = action.target != null ? elements[action.target] : null;
   if (action.type === 'click') {
-    const p = gridToScreen(rect, action);
-    await input.move(p.x, p.y);
-    await wait(120);
-    await input.down();
-    await input.up();
-  } else if (action.type === 'type' && typeof action.text === 'string') {
+    if (target && (target.type === 'button' || target.type === 'hyperlink') && SUBMIT_WORDS.test(target.name)) return;
+    await clickAt(target || gridToScreen(rect, action.at));
+  } else if (action.type === 'type') {
+    if (target) {
+      await clickAt(target);
+      await wait(150);
+      await input.key('selectall');
+    }
     await input.type(action.text.slice(0, 2000));
-  } else if (action.type === 'key' && typeof action.key === 'string') {
+  } else if (action.type === 'choose') {
+    // Opening the dropdown and typing the entry picks it, in browsers and most apps.
+    await clickAt(target);
+    await wait(350);
+    await input.type(action.text.slice(0, 200));
+    await wait(200);
+    await input.key('enter');
+  } else if (action.type === 'key') {
     await input.key(action.key);
   } else if (action.type === 'drag') {
-    const from = gridToScreen(rect, action.from);
-    const to = gridToScreen(rect, action.to);
+    const from = action.from != null ? elements[action.from] : gridToScreen(rect, action.fromAt);
+    const to = action.to != null ? elements[action.to] : gridToScreen(rect, action.toAt);
     await input.move(from.x, from.y);
     await wait(120);
     await input.down();
@@ -1024,7 +1081,20 @@ async function perform(action, rect, signal) {
     await wait(80);
     await input.up();
   }
-  await wait(260);
+  await wait(300);
+}
+
+/** The controls inside the frame. Browsers switch their accessibility on at the first ask, so ask twice. */
+async function frameElements(rect) {
+  const pixels = screen.dipToScreenRect(null, rect);
+  let list = await input.elements(pixels, process.pid);
+  if (list.length < 2) {
+    await wait(500);
+    list = await input.elements(pixels, process.pid);
+  }
+  // Labels that only repeat a control's name add nothing.
+  const named = new Set(list.filter((e) => e.type !== 'text').map((e) => e.name));
+  return list.filter((e) => e.type !== 'text' || !named.has(e.name)).slice(0, 80);
 }
 
 async function fillIn() {
@@ -1048,19 +1118,22 @@ async function fillIn() {
   try {
     for (let roundNo = 0; roundNo < FILL_ROUNDS && !controller.signal.aborted; roundNo++) {
       const rect = { ...settings.frame };
-      const image = await captureFrame();
-      const note = done.length ? `Already done: ${JSON.stringify(done)}. This is the screen now.` : 'This is the screen now.';
+      const [image, elements] = await Promise.all([captureFrame(), frameElements(rect).catch(() => [])]);
+      const note = done.length
+        ? `Already done: ${done.join('; ')}. This is the screen now. Reply done if the answer is in.`
+        : 'This is the screen now.';
       const reply = await chat(providerId, {
         model: modelFor(providerId),
         apiKey: getKey(providerId),
         baseUrl: baseUrlFor(providerId),
         messages: [
-          { role: 'system', content: fillPrompt(answer) },
+          { role: 'system', content: fillPrompt(answer, elements) },
           { role: 'user', content: note, images: [image.toJPEG(88).toString('base64')] },
         ],
         signal: controller.signal,
       });
-      const plan = readPlan(reply);
+      if (process.env.SAGE_DEBUG) console.log(`fill round ${roundNo + 1}: ${elements.length} controls\n${reply}`);
+      const plan = readCommands(reply, elements.length);
       const inTheWay = ours.filter((win) => overlapArea(win.getBounds(), rect) > 0);
       for (const win of inTheWay) {
         win.setOpacity(0);
@@ -1068,8 +1141,9 @@ async function fillIn() {
       }
       try {
         for (const action of plan.actions) {
-          await perform(action, rect, controller.signal);
-          done.push(action);
+          await perform(action, rect, elements, controller.signal);
+          const target = action.target != null ? ` ${action.target + 1}` : '';
+          done.push(`${action.type}${target}${action.text ? ` "${action.text}"` : ''}`);
         }
       } finally {
         for (const win of inTheWay) {
@@ -1078,8 +1152,8 @@ async function fillIn() {
           win.setOpacity(1);
         }
       }
-      if (plan.done || !plan.actions.length) break;
-      await wait(350); // let the page react before looking again
+      if (!plan.look || !plan.actions.length) break;
+      await wait(400); // let the page react before looking again
     }
   } catch (caught) {
     if (caught.code !== 'aborted' && !controller.signal.aborted) {
