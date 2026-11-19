@@ -85,16 +85,16 @@ function markdown(source) {
 
 function splitReply(raw, done) {
   const text = raw.replace(/<\/?[a-z]*$/i, '');
-  const answer = text.match(/<answer>\s*([\s\S]*?)\s*(?:<\/answer>|<working>|$)/i);
+  const answer = text.match(/<answer>\s*([\s\S]*?)\s*(?:<\/answer>|<explain>|<working>|$)/i);
+  const explain = text.match(/<explain>\s*([\s\S]*?)\s*(?:<\/explain>|<working>|$)/i);
   const working = text.match(/<working>\s*([\s\S]*?)\s*(?:<\/working>|$)/i);
-  if (answer || working) {
-    return { answer: answer ? answer[1].trim() : '', working: working ? working[1].trim() : '' };
-  }
+  const part = (match) => (match ? match[1].trim() : '');
+  if (answer || explain || working) return { answer: part(answer), explain: part(explain), working: part(working) };
   const plain = text.trim();
-  if (!done) return { answer: plain, working: '' };
+  if (!done) return { answer: plain, explain: '', working: '' };
   // The model ignored the format: the first paragraph is the answer, the rest the working.
   const [first, ...rest] = plain.split(/\n\s*\n/);
-  return { answer: (first || '').trim(), working: rest.join('\n\n').trim() };
+  return { answer: (first || '').trim(), explain: '', working: rest.join('\n\n').trim() };
 }
 
 // ---------- views and sizing ----------
@@ -207,19 +207,24 @@ function newCard(meta) {
 
   const answer = document.createElement('div');
   answer.className = 'answer';
+  const explain = disclosure('How to get there', 'showExplain', 'explain');
   const working = disclosure('Working out', 'showWorking');
   const thinking = disclosure('Thinking', 'showThinking', 'thinking');
   const actions = document.createElement('div');
   actions.className = 'card-actions';
   actions.innerHTML =
     `<button class="ghost retry">${icon('M13.25 8a5.25 5.25 0 1 1-1.55-3.7M13.25 2.75v2.5h-2.5')}<span>Wrong answer</span></button>` +
+    `<button class="ghost fill">${icon('M4 2.75 12.25 8l-3.6.85 2 4.15-1.5.7-2-4.15L4 12.25Z')}<span>Fill in</span></button>` +
     `<button class="ghost copy">${icon('M5.5 5.5V3.75c0-.7.55-1.25 1.25-1.25h5.5c.7 0 1.25.55 1.25 1.25v5.5c0 .7-.55 1.25-1.25 1.25H10.5M3.75 5.5h5.5c.7 0 1.25.55 1.25 1.25v5.5c0 .7-.55 1.25-1.25 1.25h-5.5c-.7 0-1.25-.55-1.25-1.25v-5.5c0-.7.55-1.25 1.25-1.25Z')}<span>Copy</span></button>`;
-  el.append(answer, working.wrap, thinking.wrap, actions);
+  el.append(answer, explain.wrap, working.wrap, thinking.wrap, actions);
   thread.appendChild(el);
 
-  const c = { el, answer, working, thinking, actions, text: '', thoughts: '', done: false, shown: false, parts: { answer: '' } };
+  const c = { el, answer, explain, working, thinking, actions, text: '', thoughts: '', done: false, shown: false, parts: { answer: '' } };
   actions.querySelector('.retry').addEventListener('click', () => {
     if (!busy && live && c === lastCard) api.retry();
+  });
+  actions.querySelector('.fill').addEventListener('click', () => {
+    if (!busy && live && c === lastCard) api.fill();
   });
   actions.querySelector('.copy').addEventListener('click', (event) => {
     api.copy(c.parts.answer);
@@ -227,7 +232,7 @@ function newCard(meta) {
     label.textContent = 'Copied';
     setTimeout(() => (label.textContent = 'Copy'), 1400);
   });
-  if (lastCard) lastCard.actions.querySelector('.retry').hidden = true;
+  if (lastCard) for (const b of lastCard.actions.querySelectorAll('.retry, .fill')) b.hidden = true;
   lastCard = c;
   paint(c);
   return c;
@@ -235,7 +240,7 @@ function newCard(meta) {
 
 function paint(c) {
   c.parts = splitReply(c.text, c.done);
-  const { answer, working } = c.parts;
+  const { answer, explain, working } = c.parts;
   if (answer) {
     const reveal = !c.shown;
     c.shown = true;
@@ -248,12 +253,15 @@ function paint(c) {
     c.answer.className = 'answer';
     c.answer.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
   }
+  c.explain.wrap.hidden = !explain;
+  if (explain) c.explain.body.innerHTML = markdown(explain);
   c.working.wrap.hidden = !working;
   if (working) c.working.body.innerHTML = markdown(working);
   c.thinking.wrap.hidden = !c.thoughts.trim();
   if (c.thoughts) c.thinking.body.textContent = c.thoughts.trim();
   c.actions.hidden = !(c.done && answer);
   c.actions.querySelector('.retry').hidden = !(live && c === lastCard);
+  c.actions.querySelector('.fill').hidden = !(live && c === lastCard);
 }
 
 function addBubble(text) {
@@ -327,6 +335,15 @@ function finish() {
 }
 
 api.onDone(finish);
+
+// "Fill in": the Answer button turns into Stop until it is finished.
+api.onFill((state) => {
+  setBusy(state.on);
+  if (state.on) toast('Filling in. Press Esc to stop.');
+  else if (state.error) toast(state.error);
+  else if (!state.count) toast('Nothing to fill in here.');
+  else $('toast').hidden = true;
+});
 
 api.onError((message) => {
   if (card && !card.text) {
@@ -487,7 +504,29 @@ $('resetPositions').addEventListener('click', () => api.resetPositions());
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
+/** A thin white bar: a share when the size is known, a sweep while waiting. */
+function showProgress(prefix, progress) {
+  const row = $(`${prefix}Row`);
+  const bar = row.querySelector('.bar');
+  row.hidden = false;
+  if (progress && progress.total) {
+    const share = Math.min(100, (progress.done / progress.total) * 100);
+    bar.classList.remove('waiting');
+    $(`${prefix}Fill`).style.width = `${share}%`;
+    $(`${prefix}Text`).textContent = `${Math.floor(share)}% of ${formatBytes(progress.total)}`;
+  } else {
+    bar.classList.add('waiting');
+    $(`${prefix}Text`).textContent = (progress && progress.label) || 'Starting…';
+  }
+}
+
+function hideProgress(prefix) {
+  $(`${prefix}Row`).hidden = true;
+  $(`${prefix}Fill`).style.width = '0';
 }
 
 function showStorage(info) {
@@ -645,6 +684,93 @@ $('baseUrl').addEventListener('change', async () => {
   refreshModels();
 });
 
+// Downloading a local model
+
+const DOWNLOAD_ICON = '<svg viewBox="0 0 16 16"><path d="M8 2.75v8M4.5 7.5 8 11l3.5-3.5M3 13.25h10" /></svg>';
+const STOP_ICON = '<svg viewBox="0 0 16 16"><path d="M5 5l6 6M11 5l-6 6" /></svg>';
+let downloadingModel = false;
+
+function setDownloading(on) {
+  downloadingModel = on;
+  $('downloadBtn').innerHTML = on ? STOP_ICON : DOWNLOAD_ICON;
+  $('downloadBtn').title = on ? 'Stop' : 'Download';
+  $('downloadName').disabled = on;
+  $('provider').disabled = on;
+}
+
+async function startModelDownload() {
+  if (downloadingModel) return api.stopDownload();
+  const name = $('downloadName').value.trim() || $('downloadName').placeholder;
+  if (!name) return;
+  const providerId = state.provider;
+  note('');
+  setDownloading(true);
+  showProgress('download', null);
+  const result = await api.download(providerId, name);
+  setDownloading(false);
+  hideProgress('download');
+  if (!result.ok) {
+    if (!result.stopped) note(result.error);
+    return;
+  }
+  $('downloadName').value = '';
+  render(result.state);
+  toast(`${name} is ready.`);
+  refreshModels();
+}
+
+$('downloadBtn').addEventListener('click', startModelDownload);
+$('downloadName').addEventListener('keydown', (event) => event.key === 'Enter' && startModelDownload());
+api.onDownload((progress) => {
+  if (!downloadingModel) return;
+  if (progress.total) return showProgress('download', progress);
+  showProgress('download', { label: /verif|writ|success/i.test(progress.status || '') ? 'Finishing…' : 'Starting…' });
+});
+
+// Updates: only when pressed.
+
+let updateFound = null;
+const updateBtn = $('updateBtn');
+
+updateBtn.addEventListener('click', async () => {
+  if (updateBtn.disabled) return;
+  if (!updateFound) {
+    updateBtn.disabled = true;
+    updateBtn.textContent = 'Checking…';
+    const result = await api.checkUpdate();
+    updateBtn.disabled = false;
+    if (!result || !result.ok) {
+      updateBtn.textContent = 'Check for updates';
+      return toast(result ? result.error : "Couldn't check for updates.");
+    }
+    if (!result.available) {
+      updateBtn.textContent = 'Up to date';
+      setTimeout(() => !updateFound && (updateBtn.textContent = 'Check for updates'), 2500);
+      return;
+    }
+    updateFound = result;
+    updateBtn.textContent = `Update to ${result.version}`;
+    return;
+  }
+  updateBtn.disabled = true;
+  updateBtn.textContent = 'Downloading update…';
+  showProgress('update', { done: 0, total: updateFound.size });
+  const result = await api.installUpdate();
+  if (!result || !result.ok) {
+    updateBtn.disabled = false;
+    updateBtn.textContent = `Update to ${updateFound.version}`;
+    hideProgress('update');
+    toast(result ? result.error : "Couldn't update.");
+  }
+});
+
+api.onUpdate((progress) => {
+  if (progress.installing) {
+    updateBtn.textContent = 'Restarting…';
+    showProgress('update', { label: 'Installing…' });
+  } else showProgress('update', progress);
+});
+
 for (const input of [$('baseUrl'), $('key')]) {
   input.addEventListener('keydown', (event) => event.key === 'Enter' && input.blur());
 }
@@ -669,6 +795,12 @@ function render(next) {
   $('keyLink').hidden = !provider.hasKeyPage || provider.hasKey;
   $('key').placeholder = provider.hasKey ? 'Saved' : 'Paste key';
   if (document.activeElement !== $('baseUrl')) $('baseUrl').value = provider.baseUrl;
+  $('downloadBox').hidden = provider.kind !== 'local';
+  const suggestions = (state.suggestedDownloads && state.suggestedDownloads[provider.id]) || [];
+  $('downloadName').placeholder = suggestions[0] || '';
+  $('downloadList').textContent = '';
+  for (const name of suggestions) $('downloadList').append(new Option(name));
+  $('versionInfo').textContent = state.version;
   setBusy(busy);
 }
 

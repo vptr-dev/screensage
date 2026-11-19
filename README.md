@@ -11,6 +11,10 @@ screen. Fit the frame around it, press **Answer**, done.
   (or `Ctrl + Shift + Space`).
 - **Clear answers.** The answer comes first, big. The working out folds away
   underneath.
+- **Explain mode.** A short "how to get there" so you can reach the same
+  answer yourself.
+- **Fill in.** Clicks, types or drags the answer into the question inside the
+  frame (never presses submit). Esc stops it.
 - **Wrong answer?** One button makes it look again and correct itself.
 - **Glass frame.** Drag it by its toolbar, pull any edge or corner, or draw a
   new area. It can shade everything outside it.
@@ -20,13 +24,15 @@ screen. Fit the frame around it, press **Answer**, done.
 - **Everywhere.** Stays on every virtual desktop and works across screens.
 - **Local or cloud.** Free and local with Ollama or LM Studio, or your own key
   for Claude, OpenAI, Gemini or OpenRouter (stored encrypted on your PC).
+  Download local models right from **Settings → Model**.
 
 ## Install
 
-This is the final release; no further updates are planned.
-
 Download the installer from [Releases](../../releases) and run it. It isn't
 code-signed, so Windows SmartScreen may ask first: **More info → Run anyway**.
+
+To update, open **Settings → General → Check for updates**. Your settings and
+recents are kept.
 
 Uninstalling asks whether to delete your local data too. You can also clear
 it any time in **Settings → Storage**.

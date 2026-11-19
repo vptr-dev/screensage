@@ -79,7 +79,29 @@
               <button id="removeKey" class="link">Remove key</button>
             </div>
             <p id="aiNote" class="error-line" hidden></p>
+            <div class="list" id="downloadBox">
+              <div class="item">
+                <span>Download</span>
+                <input id="downloadName" type="text" list="downloadList" spellcheck="false" autocomplete="off" />
+                <button id="downloadBtn" class="mini" title="Download" aria-label="Download model">
+                  <svg viewBox="0 0 16 16"><path d="M8 2.75v8M4.5 7.5 8 11l3.5-3.5M3 13.25h10" /></svg>
+                </button>
+              </div>
+              <div class="item progress-row" id="downloadRow" hidden>
+                <div class="bar"><i id="downloadFill"></i></div>
+                <span class="value" id="downloadText"></span>
+              </div>
+            </div>
+            <datalist id="downloadList"></datalist>
             <div class="list">
+              <label class="item">
+                <span>Explain mode</span>
+                <input type="checkbox" class="switch" data-pref="answers.explain" />
+              </label>
+              <label class="item">
+                <span>Fill in after answering</span>
+                <input type="checkbox" class="switch" data-pref="answers.autoFill" />
+              </label>
               <label class="item">
                 <span>Show thinking</span>
                 <input type="checkbox" class="switch" data-pref="answers.think" />
@@ -122,6 +144,17 @@
                 <span>Keep in tray when closed</span>
                 <input type="checkbox" class="switch" data-pref="behaviour.closeToTray" />
               </label>
+            </div>
+            <div class="list">
+              <div class="item">
+                <span>Version</span>
+                <span class="value" id="versionInfo"></span>
+              </div>
+              <button class="item action" id="updateBtn">Check for updates</button>
+              <div class="item progress-row" id="updateRow" hidden>
+                <div class="bar"><i id="updateFill"></i></div>
+                <span class="value" id="updateText"></span>
+              </div>
             </div>
           </div>
 

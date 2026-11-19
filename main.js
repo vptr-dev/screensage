@@ -15,7 +15,10 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { PROVIDERS, AppError, chat, listModels, suggestModel } = require('./providers');
+const { PROVIDERS, SUGGESTED_DOWNLOADS, AppError, chat, listModels, suggestModel, downloadModel } = require('./providers');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
+const input = require('./input');
 
 // The widget is a fixed width; its height follows what it is showing.
 const WIDGET = { width: 320, minHeight: 60, maxHeight: 580, margin: 14 };
@@ -31,19 +34,46 @@ const LAYOUT = 3;
 const QUESTION = 'Solve the question shown in this screen capture.';
 const RETRY =
   'That answer is wrong. Look at the capture again carefully, work it out from scratch, and give the corrected answer in the same format.';
-const SYSTEM_PROMPT = [
-  'You are looking at a capture of part of the user\'s screen.',
-  'Find the question or problem in it and solve it.',
-  'Reply in exactly this format, with nothing before or after it:',
-  '<answer>',
-  'The final answer only: the value, option, word or one short sentence. Only if the capture holds several separate questions, give one answer per line.',
-  '</answer>',
-  '<working>',
-  'How you got the answer, in a few short, clear steps.',
-  '</working>',
-  'If there is no question in the capture, put a one-sentence description of what it shows in <answer> and leave <working> empty.',
-  'Write maths in plain text (x^2, sqrt(2), 3/4), never LaTeX or dollar signs.',
-].join('\n');
+const systemPrompt = (explain) =>
+  [
+    'You are looking at a capture of part of the user\'s screen.',
+    'Find the question or problem in it and solve it.',
+    'Reply in exactly this format, with nothing before or after it:',
+    '<answer>',
+    'The final answer only: the value, option, word or one short sentence. Only if the capture holds several separate questions, give one answer per line.',
+    '</answer>',
+    ...(explain
+      ? [
+          '<explain>',
+          'A short lesson so the user can get the same answer on their own: one line saying what the question was really asking, then two to four short steps they can follow, naming any rule, formula or clue that gives it away. Plain, friendly and concise.',
+          '</explain>',
+        ]
+      : []),
+    '<working>',
+    'How you got the answer, in a few short, clear steps.',
+    '</working>',
+    `If there is no question in the capture, put a one-sentence description of what it shows in <answer> and leave ${explain ? 'the other sections' : '<working>'} empty.`,
+    'Write maths in plain text (x^2, sqrt(2), 3/4), never LaTeX or dollar signs.',
+  ].join('\n');
+
+const FILL_ROUNDS = 6;
+const fillPrompt = (answer) =>
+  [
+    'You are entering an answer into the question shown in this screen capture, using the mouse and keyboard.',
+    `The answer to enter:\n${answer}`,
+    'Positions are on a 0 to 1000 grid over the capture: x across from the left edge, y down from the top edge.',
+    'Reply with JSON only, nothing else: {"actions": [...], "done": true or false}',
+    'Actions you can use:',
+    '{"type": "click", "x": 0-1000, "y": 0-1000}  click an option, checkbox, text box or dropdown (aim for its centre)',
+    '{"type": "type", "text": "..."}  type into the box that was just clicked',
+    '{"type": "key", "key": "enter" | "tab" | "backspace" | "selectall" | "down" | "up"}',
+    '{"type": "drag", "from": {"x": .., "y": ..}, "to": {"x": .., "y": ..}}  drag an item to where it belongs',
+    'Rules:',
+    '- Only enter the answer. Never press submit, next, check, finish or similar buttons.',
+    '- If a text box already holds something, click it and use selectall before typing.',
+    '- If a dropdown or list has to open first, only click it and set done to false: you will get a new capture to pick from.',
+    '- After each reply you get a new capture. Set done to true when the answer is fully entered, or with no actions if it already is or nothing can be filled in.',
+  ].join('\n');
 
 const DEFAULTS = {
   layout: LAYOUT,
@@ -57,7 +87,7 @@ const DEFAULTS = {
   frameVisible: true,
   frameStyle: { shade: true, shadeStrength: 40 },
   behaviour: { hotkey: 'Control+Shift+Space', closeToTray: false, launchAtLogin: false },
-  answers: { think: false, showWorking: false, showThinking: false, saveHistory: true },
+  answers: { think: false, explain: false, autoFill: false, showExplain: true, showWorking: false, showThinking: false, saveHistory: true },
   timer: { seconds: 300 },
 };
 const SECTIONS = ['frameStyle', 'behaviour', 'answers', 'timer'];
@@ -72,6 +102,7 @@ let hotkeyWorks = true;
 let conversation = null;
 let session = null; // the capture the conversation is about
 let running = null; // AbortController of the answer being written
+let filling = null; // AbortController of "Fill in" while it runs
 let dragging = false; // the frame is being moved or resized
 let selecting = false; // the user is drawing a new frame
 let selection = null;
@@ -121,6 +152,9 @@ function sanitize(section, patch, current) {
   if (section === 'timer') return { seconds: clamp(p.seconds, 0, 359999, current.seconds) };
   return {
     think: !!p.think,
+    explain: !!p.explain,
+    autoFill: !!p.autoFill,
+    showExplain: !!p.showExplain,
     showWorking: !!p.showWorking,
     showThinking: !!p.showThinking,
     saveHistory: !!p.saveHistory,
@@ -172,6 +206,8 @@ const hotkeyLabel = () => settings.behaviour.hotkey.replace('Control', 'Ctrl').r
 function publicState() {
   return {
     provider: settings.provider,
+    version: app.getVersion(),
+    suggestedDownloads: SUGGESTED_DOWNLOADS,
     hotkeyLabel: hotkeyLabel(),
     hotkeyWorks,
     frameVisible: settings.frameVisible,
@@ -763,7 +799,7 @@ async function writeAnswer() {
 
 /** Runs only when the user presses Answer (or the shortcut). Nothing is read before that. */
 async function ask() {
-  if (!widget || running) return;
+  if (!widget || running || filling) return;
   showWidget();
   if (selecting) endSelect(null);
   if (!settings.frameVisible) {
@@ -783,11 +819,12 @@ async function ask() {
   const thumb = image.resize({ width: Math.min(240, size.width) }).toJPEG(75).toString('base64');
   session = { id: Date.now().toString(36), time: Date.now(), thumb: `data:image/jpeg;base64,${thumb}`, full, saved: false };
   conversation = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt(settings.answers.explain) },
     { role: 'user', content: QUESTION, images: [full.toString('base64')] },
   ];
   tell('answer:start', { id: session.id, time: session.time, thumb: session.thumb });
-  await writeAnswer().catch(() => {});
+  const reply = await writeAnswer().catch(() => null);
+  if (reply && settings.answers.autoFill) fillIn();
 }
 
 async function sendAfter(message, channel, payload) {
@@ -808,6 +845,254 @@ const followUp = (input) => {
 const retry = () => {
   if (conversation && conversation[conversation.length - 1].role === 'assistant') sendAfter(RETRY, 'answer:retry');
 };
+
+// ---------- downloading models ----------
+
+let downloading = null; // { providerId, controller }
+
+async function startDownload(providerId, model) {
+  if (downloading) return { ok: false, error: 'A download is already running.' };
+  const controller = new AbortController();
+  downloading = { providerId, controller };
+  let last = 0;
+  try {
+    await downloadModel(providerId, {
+      baseUrl: baseUrlFor(providerId),
+      model,
+      signal: controller.signal,
+      onProgress: (progress) => {
+        const now = Date.now();
+        if (now - last < 150) return; // keep the bar smooth without flooding the window
+        last = now;
+        tell('download:progress', progress);
+      },
+    });
+    settings.models[providerId] = String(model).trim();
+    saveSettings();
+    return { ok: true, state: publicState() };
+  } catch (error) {
+    return { ok: false, stopped: error.code === 'aborted', error: error.message };
+  } finally {
+    downloading = null;
+  }
+}
+
+// ---------- updates ----------
+// Only when the user presses "Check for updates": asks GitHub for the latest
+// release, and on "Update" downloads its installer, checks it and runs it.
+
+const RELEASES = 'https://api.github.com/repos/vptr-dev/screensage/releases/latest';
+let update = null; // the newer release found by the last check
+let updating = false;
+
+const versionParts = (v) => String(v).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+function isNewer(candidate, current) {
+  const a = versionParts(candidate);
+  const b = versionParts(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  }
+  return false;
+}
+
+async function checkUpdate() {
+  let release;
+  try {
+    const res = await fetch(RELEASES, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'ScreenSage' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    release = await res.json();
+  } catch {
+    return { ok: false, error: "Couldn't check for updates. Check your internet connection." };
+  }
+  const asset = (release.assets || []).find((a) => /\.exe$/i.test(a.name));
+  if (!asset || !isNewer(release.tag_name, app.getVersion())) {
+    update = null;
+    return { ok: true, available: false };
+  }
+  update = {
+    version: String(release.tag_name).replace(/^v/i, ''),
+    url: asset.browser_download_url,
+    size: asset.size,
+    sha256: /^sha256:[0-9a-f]{64}$/i.test(asset.digest || '') ? asset.digest.slice(7).toLowerCase() : null,
+  };
+  return { ok: true, available: true, version: update.version, size: update.size };
+}
+
+async function installUpdate() {
+  if (!update || updating) return { ok: false, error: 'Check for updates first.' };
+  updating = true;
+  const file = path.join(app.getPath('temp'), `ScreenSage Setup ${update.version}.exe`);
+  try {
+    const res = await fetch(update.url, { headers: { 'user-agent': 'ScreenSage' } });
+    if (!res.ok || !res.body) throw new Error(String(res.status));
+    const total = Number(res.headers.get('content-length')) || update.size || 0;
+    const hash = crypto.createHash('sha256');
+    const out = fs.createWriteStream(file);
+    let done = 0;
+    let last = 0;
+    for await (const chunk of res.body) {
+      hash.update(chunk);
+      done += chunk.length;
+      if (!out.write(chunk)) await new Promise((resolve) => out.once('drain', resolve));
+      if (Date.now() - last > 150) {
+        last = Date.now();
+        tell('update:progress', { done, total });
+      }
+    }
+    await new Promise((resolve, reject) => out.end((error) => (error ? reject(error) : resolve())));
+    if (update.sha256 && hash.digest('hex') !== update.sha256) {
+      fs.rmSync(file, { force: true });
+      throw new Error('checksum');
+    }
+  } catch (error) {
+    updating = false;
+    return {
+      ok: false,
+      error: error.message === 'checksum' ? "The download didn't check out. Try again." : "Couldn't download the update. Try again.",
+    };
+  }
+  tell('update:progress', { installing: true });
+  // The installer replaces this copy (keeping all data), then opens the new one.
+  spawn(file, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
+  setTimeout(() => {
+    quitting = true;
+    app.quit();
+  }, 400);
+  return { ok: true };
+}
+
+// ---------- fill in ----------
+// Puts the latest answer into the question inside the frame: the model looks at
+// a fresh capture and says where to click, type or drag, a few rounds at most.
+
+function latestAnswer() {
+  const last = conversation && [...conversation].reverse().find((m) => m.role === 'assistant');
+  if (!last) return '';
+  const match = last.content.match(/<answer>\s*([\s\S]*?)\s*(?:<\/answer>|<explain>|<working>|$)/i);
+  return (match ? match[1] : last.content.split(/\n\s*\n/)[0]).trim();
+}
+
+function readPlan(reply) {
+  const start = reply.indexOf('{');
+  const end = reply.lastIndexOf('}');
+  if (start < 0 || end < start) return { actions: [], done: true };
+  try {
+    const plan = JSON.parse(reply.slice(start, end + 1));
+    return { actions: Array.isArray(plan.actions) ? plan.actions.slice(0, 12) : [], done: plan.done !== false };
+  } catch {
+    return { actions: [], done: true };
+  }
+}
+
+/** A point on the 0–1000 grid of the capture, as a real screen pixel. */
+function gridToScreen(rect, point) {
+  const gx = Math.min(1000, Math.max(0, Number(point && point.x) || 0));
+  const gy = Math.min(1000, Math.max(0, Number(point && point.y) || 0));
+  return screen.dipToScreenPoint({ x: rect.x + (gx / 1000) * rect.width, y: rect.y + (gy / 1000) * rect.height });
+}
+
+async function perform(action, rect, signal) {
+  const check = () => {
+    if (signal.aborted) throw Object.assign(new Error('stopped'), { code: 'aborted' });
+  };
+  check();
+  if (action.type === 'click') {
+    const p = gridToScreen(rect, action);
+    await input.move(p.x, p.y);
+    await wait(120);
+    await input.down();
+    await input.up();
+  } else if (action.type === 'type' && typeof action.text === 'string') {
+    await input.type(action.text.slice(0, 2000));
+  } else if (action.type === 'key' && typeof action.key === 'string') {
+    await input.key(action.key);
+  } else if (action.type === 'drag') {
+    const from = gridToScreen(rect, action.from);
+    const to = gridToScreen(rect, action.to);
+    await input.move(from.x, from.y);
+    await wait(120);
+    await input.down();
+    // Pages only notice a drag if the pointer moves in between.
+    for (let step = 1; step <= 16; step++) {
+      check();
+      await input.move(from.x + ((to.x - from.x) * step) / 16, from.y + ((to.y - from.y) * step) / 16);
+      await wait(18);
+    }
+    await wait(80);
+    await input.up();
+  }
+  await wait(260);
+}
+
+async function fillIn() {
+  const answer = latestAnswer();
+  if (filling || running || !answer || !settings.frameVisible) return;
+  const controller = new AbortController();
+  filling = controller;
+  input.warmUp();
+  tell('fill:state', { on: true });
+  try {
+    globalShortcut.register('Escape', () => controller.abort());
+  } catch {
+    // Esc is taken; the Stop button still works.
+  }
+  const providerId = settings.provider;
+  const done = [];
+  // Clicks must reach the page under the frame, not our own windows.
+  const ours = [widget, timerWin].filter((win) => win && !win.isDestroyed() && win.isVisible());
+  for (const win of overlays) win.setIgnoreMouseEvents(true);
+  let error = null;
+  try {
+    for (let roundNo = 0; roundNo < FILL_ROUNDS && !controller.signal.aborted; roundNo++) {
+      const rect = { ...settings.frame };
+      const image = await captureFrame();
+      const note = done.length ? `Already done: ${JSON.stringify(done)}. This is the screen now.` : 'This is the screen now.';
+      const reply = await chat(providerId, {
+        model: modelFor(providerId),
+        apiKey: getKey(providerId),
+        baseUrl: baseUrlFor(providerId),
+        messages: [
+          { role: 'system', content: fillPrompt(answer) },
+          { role: 'user', content: note, images: [image.toJPEG(88).toString('base64')] },
+        ],
+        signal: controller.signal,
+      });
+      const plan = readPlan(reply);
+      const inTheWay = ours.filter((win) => overlapArea(win.getBounds(), rect) > 0);
+      for (const win of inTheWay) {
+        win.setOpacity(0);
+        win.setIgnoreMouseEvents(true);
+      }
+      try {
+        for (const action of plan.actions) {
+          await perform(action, rect, controller.signal);
+          done.push(action);
+        }
+      } finally {
+        for (const win of inTheWay) {
+          if (win.isDestroyed()) continue;
+          win.setIgnoreMouseEvents(false);
+          win.setOpacity(1);
+        }
+      }
+      if (plan.done || !plan.actions.length) break;
+      await wait(350); // let the page react before looking again
+    }
+  } catch (caught) {
+    if (caught.code !== 'aborted' && !controller.signal.aborted) {
+      error = caught instanceof AppError ? caught.message : `Couldn't fill it in: ${caught.message}`;
+    }
+  } finally {
+    globalShortcut.unregister('Escape');
+    for (const win of overlays) if (!win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: true });
+    filling = null;
+    tell('fill:state', { on: false, error, count: done.length });
+    raiseFloating();
+  }
+}
 
 // ---------- tray ----------
 
@@ -963,7 +1248,19 @@ function registerIpc() {
   ipcMain.on('ask', (event) => fromWidget(event) && ask());
   ipcMain.on('retry', (event) => fromWidget(event) && retry());
   ipcMain.on('followup', (event, question) => fromWidget(event) && followUp(question));
-  ipcMain.on('stop', (event) => fromWidget(event) && running && running.abort());
+  ipcMain.on('stop', (event) => {
+    if (!fromWidget(event)) return;
+    if (running) running.abort();
+    if (filling) filling.abort();
+  });
+  ipcMain.on('fill', (event) => fromWidget(event) && fillIn());
+  ipcMain.handle('model:download', (event, providerId, model) => {
+    if (!fromWidget(event) || !PROVIDERS[providerId]) return { ok: false, error: 'Unknown provider.' };
+    return startDownload(providerId, text(model, 300));
+  });
+  ipcMain.on('model:download-stop', (event) => fromWidget(event) && downloading && downloading.controller.abort());
+  ipcMain.handle('update:check', (event) => (fromWidget(event) ? checkUpdate() : null));
+  ipcMain.handle('update:install', (event) => (fromWidget(event) ? installUpdate() : null));
   ipcMain.on('copy', (event, value) => fromWidget(event) && clipboard.writeText(text(value, 200000)));
   ipcMain.on('image:open', (event, id) => fromWidget(event) && openImage(text(id, 40)));
   ipcMain.on('frame:toggle', (event) => fromWidget(event) && setFrameVisible(!settings.frameVisible));
@@ -991,7 +1288,7 @@ function registerIpc() {
   // Frame overlays
   ipcMain.on('overlay:ignore', (event, ignore) => {
     const win = overlayOf(event);
-    if (win && !dragging && !selecting) win.setIgnoreMouseEvents(!!ignore, { forward: true });
+    if (win && !dragging && !selecting && !filling) win.setIgnoreMouseEvents(!!ignore, { forward: true });
   });
   ipcMain.on('overlay:rect', (event, rect, final) => {
     const win = overlayOf(event);
@@ -1049,6 +1346,9 @@ if (!app.requestSingleInstanceLock()) {
     for (const name of ['display-added', 'display-removed', 'display-metrics-changed']) screen.on(name, screensChanged);
   });
 
-  app.on('will-quit', () => globalShortcut.unregisterAll());
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    input.stop();
+  });
   app.on('window-all-closed', () => app.quit());
 }

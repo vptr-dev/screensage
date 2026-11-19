@@ -263,6 +263,10 @@
   font-size: 1em;
 }
 
+.explain .fold > .body {
+  color: var(--text);
+}
+
 .thinking .body {
   white-space: pre-wrap;
   font-size: 12px;
@@ -606,6 +610,44 @@ pre code {
   to {
     transform: rotate(360deg);
   }
+}
+
+.progress-row .bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--field);
+  overflow: hidden;
+}
+
+.progress-row .bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #fff;
+  transition: width 0.3s var(--ease);
+}
+
+.progress-row .bar.waiting i {
+  width: 30%;
+  transition: none;
+  animation: slide 1.3s var(--ease) infinite;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.progress-row .value {
+  flex: none;
+  min-width: 92px;
+  font-size: 11.5px;
 }
 
 .keycap {

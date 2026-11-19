@@ -119,7 +119,7 @@ function friendly(info, model, error) {
   }
   if (error.status === 404) {
     if (info.id === 'ollama') {
-      return new AppError(`The model ${model} isn't downloaded yet. Run: ollama pull ${model}`, 'model_missing');
+      return new AppError(`The model ${model} isn't downloaded yet. Get it in Settings → Model → Download.`, 'model_missing');
     }
     return new AppError(`${label} doesn't know the model '${model}'. Pick another in Settings.`, 'model_missing');
   }
@@ -383,6 +383,85 @@ async function listModels(providerId, { apiKey = '', baseUrl = '' } = {}) {
   }
 }
 
+// ---------- downloading local models ----------
+
+// A few models that can read pictures, offered when downloading.
+const SUGGESTED_DOWNLOADS = {
+  ollama: ['gemma3:4b', 'gemma3:12b', 'qwen2.5vl:7b', 'llama3.2-vision', 'minicpm-v'],
+  lmstudio: ['google/gemma-3-4b', 'google/gemma-3-12b', 'qwen/qwen2.5-vl-7b'],
+};
+
+async function ollamaPull({ info, model, onProgress, signal }) {
+  const res = await send(`${info.baseUrl}/api/pull`, {
+    method: 'POST',
+    json: { model, stream: true },
+    signal,
+    timeout: 6 * 60 * 60 * 1000,
+  });
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const handle = (line) => {
+    if (!line.trim()) return;
+    const data = JSON.parse(line);
+    if (data.error) {
+      const missing = /not found|does not exist|manifest/i.test(data.error);
+      throw new AppError(missing ? `Ollama has no model called '${model}'.` : `Ollama: ${data.error}`);
+    }
+    if (data.total) onProgress({ done: data.completed || 0, total: data.total });
+    else if (data.status) onProgress({ status: data.status });
+  };
+  try {
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      lines.forEach(handle);
+    }
+    handle(buffer);
+  } catch (err) {
+    if (signal && signal.aborted) throw new AppError('Stopped.', 'aborted');
+    throw err;
+  }
+}
+
+async function lmstudioDownload({ info, model, onProgress, signal }) {
+  // The download API lives next to the OpenAI-style one: http://host:1234/api/v1
+  const root = info.baseUrl.replace(/\/v1$/, '');
+  let job;
+  try {
+    job = await postJson(`${root}/api/v1/models/download`, { model }, { signal, timeout: 30000 });
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404 && !/model/i.test(error.body)) {
+      throw new AppError('Update LM Studio to 0.4 or newer to download from here.');
+    }
+    if (error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 401) {
+      throw new AppError(`LM Studio couldn't find '${model}'.`);
+    }
+    throw error;
+  }
+  while (job.status !== 'completed' && job.status !== 'already_downloaded') {
+    if (job.status === 'failed') throw new AppError('LM Studio couldn\'t finish the download.');
+    if (job.total_size_bytes) onProgress({ done: job.downloaded_bytes || 0, total: job.total_size_bytes });
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (signal && signal.aborted) throw new AppError('Stopped.', 'aborted');
+    job = await getJson(`${root}/api/v1/models/download/status/${encodeURIComponent(job.job_id)}`, { signal, timeout: 15000 });
+  }
+}
+
+/** Download a model into Ollama or LM Studio. onProgress gets { done, total } or { status }. */
+async function downloadModel(providerId, { baseUrl = '', model, onProgress = () => {}, signal }) {
+  const info = infoFor(providerId, baseUrl);
+  if (info.kind !== 'local') throw new AppError('Only local models can be downloaded.');
+  const name = String(model || '').trim();
+  if (!name) throw new AppError('Type the name of a model first.');
+  try {
+    if (providerId === 'ollama') await ollamaPull({ info, model: name, onProgress, signal });
+    else await lmstudioDownload({ info, model: name, onProgress, signal });
+  } catch (error) {
+    throw friendly(info, name, error);
+  }
+}
+
 // Words that usually mark a provider's cheaper, faster models.
 const CHEAP_HINTS = ['haiku', 'mini', 'flash', 'small', 'lite'];
 
@@ -394,4 +473,4 @@ function suggestModel(models) {
   return models[0] || '';
 }
 
-module.exports = { PROVIDERS, AppError, chat, listModels, suggestModel };
+module.exports = { PROVIDERS, SUGGESTED_DOWNLOADS, AppError, chat, listModels, suggestModel, downloadModel };
