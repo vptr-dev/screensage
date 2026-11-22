@@ -278,6 +278,62 @@
   overflow-y: auto;
 }
 
+/* Maths: drawn natively from MathML, in a proper maths font. */
+math {
+  font-family: 'Cambria Math', 'STIX Two Math', math;
+  font-size: 1.12em;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+math[display='block'] {
+  margin: 0;
+  padding: 3px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.answer math {
+  font-size: 1.15em;
+}
+
+p.eq {
+  margin: 0 0 2px;
+}
+
+.answer math[display='block'] {
+  margin: 2px 0;
+}
+
+/* Fractions and roots read more easily with a little room. */
+mfrac > * {
+  padding: 0 2px;
+}
+
+code.tex {
+  color: var(--muted);
+}
+
+table {
+  width: 100%;
+  margin: 4px 0 8px;
+  border-collapse: collapse;
+  font-size: 0.96em;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 4px 8px;
+  text-align: left;
+  box-shadow: inset 0 -0.5px 0 var(--hair-strong);
+}
+
+th {
+  color: var(--text);
+  font-weight: 600;
+}
+
 code {
   padding: 1px 4px;
   border-radius: 4px;
@@ -784,9 +840,9 @@ input[type='range']:hover::-webkit-slider-thumb {
   padding: 7px 10px;
   border-radius: 8px;
   font-size: 12px;
-  color: var(--danger);
-  background: rgba(255, 90, 80, 0.1);
-  box-shadow: inset 0 0 0 0.5px rgba(255, 138, 128, 0.3);
+  color: var(--text);
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--hair-strong);
   animation: rise 0.3s var(--ease) both;
 }
 
@@ -879,4 +935,519 @@ footer {
   background: rgba(255, 255, 255, 0.12);
   color: var(--text);
   box-shadow: inset 0 0 0 0.5px var(--hair-strong);
+}
+
+/* ---------- Steps: blocks that run after an answer ---------- */
+
+.flow {
+  display: flex;
+  flex-direction: column;
+}
+
+.blocks {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.block {
+  position: relative;
+  margin-top: 8px;
+  border-radius: 10px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--hair-strong);
+  transition:
+    background-color 0.2s var(--ease),
+    box-shadow 0.25s var(--ease);
+}
+
+.block.fixed {
+  margin-top: 0;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* A fine line joins each block to the one above it. */
+.block:not(.fixed)::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 21px;
+  width: 1px;
+  height: 8px;
+  background: var(--hair-strong);
+}
+
+.block.entering {
+  animation: rise 0.32s var(--ease) both;
+}
+
+.block.leaving {
+  pointer-events: none;
+  animation: leave 0.22s var(--ease) both;
+}
+
+@keyframes leave {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+    filter: blur(4px);
+  }
+}
+
+.block.dragging {
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.3),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.block.running {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.75),
+    0 0 18px rgba(255, 255, 255, 0.12);
+}
+
+.block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 8px 0 6px;
+  font-size: 12.5px;
+  cursor: default;
+}
+
+.block.fixed .block-head {
+  padding-left: 12px;
+}
+
+.grip {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 24px;
+  color: var(--faint);
+  cursor: grab;
+  touch-action: none;
+}
+
+.block.dragging .grip {
+  cursor: grabbing;
+}
+
+.grip svg {
+  width: 8px;
+  height: 12px;
+  fill: currentColor;
+  stroke: none;
+}
+
+.bicon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.bicon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.btitle {
+  flex: none;
+  font-weight: 500;
+}
+
+.bsum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.block .remove {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+}
+
+.block:hover .remove,
+.block.open .remove {
+  opacity: 1;
+}
+
+.block.open .fold {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.block-body {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 10px 0 12px;
+}
+
+.block-body > :first-child {
+  margin-top: 2px;
+}
+
+.block-body > :last-child {
+  margin-bottom: 10px;
+}
+
+.brow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.brow > span:first-child {
+  flex: none;
+  width: 48px;
+  color: var(--muted);
+}
+
+.brow input[type='text'],
+.brow input[type='number'] {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--field);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+  color: var(--text);
+  font-size: 12px;
+  transition: box-shadow 0.2s var(--ease);
+}
+
+.brow input[type='number'] {
+  flex: none;
+  width: 64px;
+  font-variant-numeric: tabular-nums;
+}
+
+.brow input:hover,
+.brow input:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.35);
+}
+
+.brow .unit {
+  color: var(--faint);
+}
+
+.brow .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.brow[hidden] {
+  display: none;
+}
+
+.brow .keycap {
+  margin-left: 0;
+}
+
+.bnote {
+  margin: 0 0 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Segmented choice, white when chosen. */
+.seg {
+  flex: 1;
+  display: flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--field);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+}
+
+.seg button {
+  flex: 1;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  transition:
+    background-color 0.22s var(--ease),
+    color 0.22s var(--ease);
+}
+
+.seg button:hover {
+  color: var(--text);
+}
+
+.seg button.on {
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+}
+
+.spot {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.spot > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.spot > span.unset {
+  color: var(--faint);
+}
+
+.pill-button {
+  flex: none;
+  height: 24px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  font-size: 11.5px;
+  font-weight: 600;
+  transition:
+    transform 0.2s var(--ease),
+    opacity 0.2s var(--ease);
+}
+
+.pill-button:hover {
+  transform: translateY(-0.5px);
+}
+
+.pill-button:disabled {
+  opacity: 0.5;
+}
+
+/* Adding a block. */
+.add {
+  margin-top: 8px;
+}
+
+.add-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: inset 0 0 0 0.5px var(--hair-strong);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  transition:
+    background-color 0.2s var(--ease),
+    color 0.2s var(--ease);
+}
+
+.add-button:hover,
+.add.open #addBlock,
+.add.presets #presetsBtn {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.add-button svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 0.3s var(--ease);
+}
+
+.add.open #addBlock svg {
+  transform: rotate(45deg);
+}
+
+.add-row {
+  display: flex;
+  gap: 6px;
+}
+
+.add-row > #addBlock {
+  flex: 1;
+  min-width: 0;
+}
+
+.presets-button {
+  flex: none;
+  width: auto;
+  padding: 0 14px;
+}
+
+.add.open .menu-fold,
+.add.presets .preset-fold {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+/* Presets: ready-made sets of blocks, and ones you saved. */
+.preset-menu {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preset-menu > :first-child {
+  margin-top: 6px;
+}
+
+.preset-label {
+  margin: 6px 0 0 4px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.preset {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  border-radius: 8px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+  transition: background-color 0.2s var(--ease);
+}
+
+.preset:hover {
+  background: var(--fill-hover);
+}
+
+.preset-load {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+
+.preset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-icons {
+  flex: none;
+  display: flex;
+  gap: 3px;
+  width: 39px; /* three icons, so the names line up */
+  overflow: hidden;
+  color: var(--muted);
+}
+
+.preset-icons svg {
+  width: 11px;
+  height: 11px;
+}
+
+.preset .mini {
+  margin-right: 3px;
+}
+
+.preset-save {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+}
+
+.preset-save input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--field);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.preset-save input:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.35);
+}
+
+.preset-save .pill-button:disabled {
+  opacity: 0.4;
+}
+
+.block-menu {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.block-menu > :nth-child(-n + 2) {
+  margin-top: 6px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  transition: background-color 0.2s var(--ease);
+}
+
+.menu-item:hover {
+  background: var(--fill-hover);
+}
+
+.menu-item svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
 }

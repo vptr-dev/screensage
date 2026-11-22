@@ -1,7 +1,7 @@
 {
   "name": "screensage",
   "productName": "ScreenSage",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Answers whatever question is inside the frame on your screen.",
   "main": "main.js",
   "scripts": {
@@ -21,6 +21,8 @@
       "preload.js",
       "providers.js",
       "input.js",
+      "plain.js",
+      "node_modules/katex/dist/katex.min.js",
       "renderer/**/*",
       "assets/icon.png"
     ],
@@ -43,5 +45,8 @@
       "include": "assets/installer.nsh",
       "artifactName": "ScreenSage Setup.${ext}"
     }
+  },
+  "dependencies": {
+    "katex": "0.16.47"
   }
 }

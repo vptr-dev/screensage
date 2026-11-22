@@ -48,6 +48,7 @@
             <span class="chip" id="tabChip"></span>
             <button role="tab" data-tab="model" class="on">Model</button>
             <button role="tab" data-tab="frame">Frame</button>
+            <button role="tab" data-tab="steps">Steps</button>
             <button role="tab" data-tab="general">General</button>
             <button role="tab" data-tab="storage">Storage</button>
           </div>
@@ -99,10 +100,6 @@
                 <input type="checkbox" class="switch" data-pref="answers.explain" />
               </label>
               <label class="item">
-                <span>Fill in after answering</span>
-                <input type="checkbox" class="switch" data-pref="answers.autoFill" />
-              </label>
-              <label class="item">
                 <span>Show thinking</span>
                 <input type="checkbox" class="switch" data-pref="answers.think" />
               </label>
@@ -127,6 +124,36 @@
             <div class="list">
               <button class="item action" id="drawArea">Draw a new area</button>
               <button class="item action" id="resetPositions">Reset positions</button>
+            </div>
+          </div>
+
+          <div class="panel" data-panel="steps" hidden>
+            <div class="flow">
+              <div class="block fixed">
+                <div class="block-head">
+                  <span class="bicon"><svg viewBox="0 0 16 16"><path d="M8 2.25 9.55 6.45 13.75 8l-4.2 1.55L8 13.75 6.45 9.55 2.25 8l4.2-1.55Z" /></svg></span>
+                  <span class="btitle">Answer</span>
+                  <span class="bsum" id="stepsSum"></span>
+                  <input type="checkbox" class="switch" id="stepsOn" title="Run the blocks after each answer" aria-label="Run the blocks after each answer" />
+                </div>
+              </div>
+              <div id="blocks" class="blocks"></div>
+              <div class="add">
+                <div class="add-row">
+                  <button id="addBlock" class="add-button" aria-expanded="false">
+                    <svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" /></svg><span>Add a block</span>
+                  </button>
+                  <button id="presetsBtn" class="add-button presets-button" aria-expanded="false">
+                    <svg viewBox="0 0 16 16"><path d="M2.75 5.5 8 2.75l5.25 2.75L8 8.25ZM2.75 8.25 8 11l5.25-2.75M2.75 11 8 13.75 13.25 11" /></svg><span>Presets</span>
+                  </button>
+                </div>
+                <div class="fold menu-fold"><div id="blockMenu" class="block-menu" role="menu"></div></div>
+                <div class="fold preset-fold"><div id="presetMenu" class="preset-menu" role="menu"></div></div>
+              </div>
+            </div>
+            <div class="links">
+              <button id="runSteps" class="link">Run now</button>
+              <button id="undoPreset" class="link" hidden>Undo</button>
             </div>
           </div>
 
@@ -193,6 +220,7 @@
         <button id="ask" class="primary"><span id="askLabel">Answer</span></button>
       </footer>
     </div>
+    <script src="../node_modules/katex/dist/katex.min.js"></script>
     <script src="widget.js"></script>
   </body>
 </html>

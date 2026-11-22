@@ -9,13 +9,33 @@ screen. Fit the frame around it, press **Answer**, done.
 
 - **Answer on demand.** Nothing is captured or sent until you press Answer
   (or `Ctrl + Shift + Space`).
-- **Clear answers.** The answer comes first, big. The working out folds away
-  underneath.
+- **Clear answers.** The answer comes first, big, with proper maths
+  (fractions, roots, powers). The working out folds away underneath.
 - **Explain mode.** A short "how to get there" so you can reach the same
   answer yourself.
 - **Fill in.** Clicks, types or drags the answer into the question inside the
   frame (never presses submit). Esc stops it.
-- **Wrong answer?** One button makes it look again and correct itself.
+- **Steps.** Line up blocks that run after each answer: Fill in, Click, Click
+  by name, Type, Press keys, Wait, Scroll, Copy answer, Read aloud, Mouse
+  back, Check result and Keep going. Drag them into order in
+  **Settings → Steps**.
+- **Check result.** Reads whether the quiz marked the answer right (its words,
+  ticks and crosses, or green and red). If it was wrong, it works out a new
+  answer with what the quiz said and tries again.
+- **Keep going.** Answers the next question too, as many times as you choose,
+  with an optional wait (seconds or minutes) between questions. Stops on Esc
+  or when the page stops changing.
+- **Presets.** Start from a ready-made set (Answer them all; Fill in, check,
+  next; Fill in and submit; Type it and press Enter…) or save your own blocks
+  under a name, one for each site you use.
+- **Clicks that follow the button.** Point at a button once (say Check answer
+  or Next) and it is found again on every question, even when it moves: by its
+  name, by reading the words on screen, or by how it looks. A click can also
+  wait for the page to change before the next block runs.
+- **Wrong answer?** One button solves it again from scratch with fresh
+  thinking, and always comes back with a different answer.
+- **No going in circles.** If the thinking keeps doubling back, it starts
+  over with a shorter, more decisive think.
 - **Glass frame.** Drag it by its toolbar, pull any edge or corner, or draw a
   new area. It can shade everything outside it.
 - **Recents.** Past answers with their captures; click a capture to see it

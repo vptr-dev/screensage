@@ -136,12 +136,12 @@ function splitSystem(messages) {
 
 // ---------- Ollama (streams the answer as it is written) ----------
 
-async function ollamaChat({ info, model, messages, onChunk, onThinking, think, signal }) {
+async function ollamaChat({ info, model, messages, onChunk, onThinking, think, temperature = 0.2, signal }) {
   const payload = {
     model,
     messages,
     stream: true,
-    options: { temperature: 0.2 },
+    options: { temperature },
     // Models like gemma4 "think" first by default, which makes answers 2-3x
     // slower, so it is only on when the user asks for it.
     think: !!think,
@@ -252,10 +252,10 @@ async function anthropicModels({ info, apiKey }) {
 
 const bearer = (apiKey) => (apiKey ? { Authorization: `Bearer ${apiKey}` } : {});
 
-async function openaiChat({ info, model, apiKey, messages, signal }) {
+async function openaiChat({ info, model, apiKey, messages, temperature = 0.2, signal }) {
   const payload = {
     model,
-    temperature: 0.2,
+    temperature,
     messages: messages.map((m) => {
       if (!m.images || !m.images.length) return { role: m.role, content: m.content };
       const parts = [{ type: 'text', text: m.content }];
@@ -292,7 +292,7 @@ async function openaiModels({ info, apiKey }) {
 
 // ---------- Gemini ----------
 
-async function geminiChat({ info, model, apiKey, messages, signal }) {
+async function geminiChat({ info, model, apiKey, messages, temperature = 0.2, signal }) {
   const { system, rest } = splitSystem(messages);
   const payload = {
     contents: rest.map((m) => ({
@@ -302,7 +302,7 @@ async function geminiChat({ info, model, apiKey, messages, signal }) {
         (m.images || []).map((data) => ({ inline_data: { mime_type: 'image/jpeg', data } })),
       ),
     })),
-    generationConfig: { temperature: 0.2 },
+    generationConfig: { temperature },
   };
   if (system) payload.systemInstruction = { parts: [{ text: system }] };
   const name = model.replace(/^models\//, '');
@@ -356,16 +356,16 @@ function requireKey(info, apiKey) {
  */
 async function chat(
   providerId,
-  { model, apiKey = '', baseUrl = '', messages, think = false, onChunk = () => {}, onThinking = () => {}, signal },
+  { model, apiKey = '', baseUrl = '', messages, think = false, temperature, onChunk = () => {}, onThinking = () => {}, signal },
 ) {
   const info = infoFor(providerId, baseUrl);
   requireKey(info, apiKey);
   if (!model) throw new AppError(`Pick a ${info.label} model in Settings first.`, 'missing_model');
   try {
     if (providerId === 'ollama') {
-      return await ollamaChat({ info, model, messages, onChunk, onThinking, think, signal });
+      return await ollamaChat({ info, model, messages, onChunk, onThinking, think, temperature, signal });
     }
-    const text = await IMPL[providerId].chat({ info, model, apiKey, messages, signal, onThinking });
+    const text = await IMPL[providerId].chat({ info, model, apiKey, messages, temperature, signal, onThinking });
     onChunk(text);
     return text;
   } catch (error) {

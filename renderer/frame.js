@@ -37,6 +37,7 @@ function render() {
   if (!st) return;
   const rect = local || (st.selecting ? st.selection : st.hole);
   body.classList.toggle('on', st.visible);
+  body.classList.toggle('picking', !!st.picking);
   body.classList.toggle('selecting', st.selecting);
   body.classList.toggle('blank', st.selecting && !rect);
   body.classList.toggle('shade', st.selecting || st.shade);
@@ -95,22 +96,39 @@ function resized(mode, start, dx, dy) {
   return { x, y, width, height };
 }
 
+const pickMark = document.getElementById('pick');
+
 document.addEventListener('mousemove', (event) => {
+  if (st && st.picking) {
+    pickMark.style.setProperty('--x', `${event.clientX}px`);
+    pickMark.style.setProperty('--y', `${event.clientY}px`);
+    return;
+  }
   if (!st || drag || draw || st.selecting) return;
   setIgnore(!event.target.closest('[data-mode], [data-action]'));
 });
 
 document.addEventListener('mouseleave', () => {
+  if (st && st.picking) {
+    pickMark.style.removeProperty('--x'); // the mouse went to another screen
+    pickMark.style.removeProperty('--y');
+    return;
+  }
   if (!drag && !draw) setIgnore(true);
 });
 
 document.addEventListener('contextmenu', (event) => {
   event.preventDefault();
-  if (st && st.selecting) bridge.select(null, true); // right-click cancels drawing
+  if (st && st.picking) bridge.pick(null); // right-click cancels picking
+  else if (st && st.selecting) bridge.select(null, true); // and drawing
 });
 
 document.addEventListener('pointerdown', (event) => {
   if (!st || event.button !== 0) return;
+  if (st.picking) {
+    bridge.pick(point(event));
+    return;
+  }
   if (st.selecting) {
     draw = point(event);
     body.setPointerCapture(event.pointerId);

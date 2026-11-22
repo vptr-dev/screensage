@@ -24,13 +24,19 @@ contextBridge.exposeInMainWorld('sage', {
   followUp: send('followup'),
   stop: send('stop'),
   fill: send('fill'),
+  setSteps: invoke('steps:set'),
+  pickSpot: invoke('steps:pick'),
+  runSteps: send('steps:run'),
+  onAuto: on('auto:state'),
+  onWait: on('auto:wait'),
+  onVerdict: on('auto:verdict'),
+  onSpeak: on('speak'),
   download: invoke('model:download'),
   stopDownload: send('model:download-stop'),
   onDownload: on('download:progress'),
   checkUpdate: invoke('update:check'),
   installUpdate: invoke('update:install'),
   onUpdate: on('update:progress'),
-  onFill: on('fill:state'),
   copy: send('copy'),
   openImage: send('image:open'),
   toggleFrame: send('frame:toggle'),
@@ -47,6 +53,9 @@ contextBridge.exposeInMainWorld('sage', {
   onError: on('answer:error'),
   onFollowUp: on('answer:followup'),
   onRetry: on('answer:retry'),
+  onRethink: on('answer:rethink'),
+  onReplace: on('answer:replace'),
+  onToast: on('toast'),
   onReset: on('reset'),
 });
 
@@ -56,6 +65,7 @@ contextBridge.exposeInMainWorld('overlayApi', {
   setIgnore: send('overlay:ignore'),
   rect: send('overlay:rect'),
   select: send('overlay:select'),
+  pick: send('overlay:pick'),
   action: send('overlay:action'),
 });
 

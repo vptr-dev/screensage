@@ -23,13 +23,65 @@ function inline(text) {
     .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
 }
 
-function markdown(source) {
-  const lines = source.replace(/\r/g, '').split('\n');
+// ---------- maths ----------
+// LaTeX in a reply ($…$, $$…$$, \(…\), \[…\]) becomes MathML, which the
+// window draws natively. Prices like "$5 and $10" are left alone.
+
+const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?=\S)([^$\n]*?\S)\$(?!\d)/g;
+
+function renderMath(tex, display) {
+  try {
+    return katex.renderToString(tex, { output: 'mathml', displayMode: display, throwOnError: true, strict: 'ignore' });
+  } catch {
+    return `<code class="tex">${escapeHtml(tex)}</code>`;
+  }
+}
+
+/** While a reply is still arriving, hide maths that has started but not finished. */
+function hideOpenMath(text) {
+  const masked = text.replace(MATH, (m) => ' '.repeat(m.length));
+  let cut = -1;
+  for (const opener of ['$$', '\\[', '\\(']) {
+    const i = masked.lastIndexOf(opener);
+    if (i >= 0 && (cut < 0 || i < cut)) cut = i;
+  }
+  const lineStart = masked.lastIndexOf('\n') + 1;
+  const single = masked.slice(lineStart).search(/\$(?=\S)/);
+  if (single >= 0 && (cut < 0 || lineStart + single < cut)) cut = lineStart + single;
+  return cut >= 0 ? text.slice(0, cut) : text;
+}
+
+function table(rows) {
+  const cells = (row) => row.trim().replace(/^\||\|$/g, '').split('|').map((cell) => inline(cell.trim()));
+  const body = rows.filter((row) => !/^\s*\|?\s*:?-{2,}/.test(row));
+  if (!body.length) return '';
+  const [head, ...rest] = body;
+  return (
+    `<table><thead><tr>${cells(head).map((c) => `<th>${c}</th>`).join('')}</tr></thead>` +
+    `<tbody>${rest.map((row) => `<tr>${cells(row).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+  );
+}
+
+function markdown(source, done = true) {
+  let text = source.replace(/\r/g, '');
+  if (!done) text = hideOpenMath(text);
+  const maths = [];
+  text = text.replace(MATH, (whole, a, b, c, d) => {
+    maths.push(renderMath((a ?? b ?? c ?? d).trim(), a != null || b != null));
+    return `\u0000${maths.length - 1}\u0000`;
+  });
+  return markdownBlocks(text).replace(/\u0000(\d+)\u0000/g, (_, i) => maths[Number(i)]);
+}
+
+function markdownBlocks(source) {
+  const lines = source.split('\n');
   const out = [];
   let paragraph = [];
   let list = null; // 'ul' | 'ol'
   const endParagraph = () => {
-    if (paragraph.length) out.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);
+    // An equation on its own sits close to its neighbours.
+    const equation = paragraph.length === 1 && /^\s*\u0000\d+\u0000\s*$/.test(paragraph[0]);
+    if (paragraph.length) out.push(`<p${equation ? ' class="eq"' : ''}>${paragraph.map(inline).join('<br>')}</p>`);
     paragraph = [];
   };
   const endList = () => {
@@ -50,9 +102,18 @@ function markdown(source) {
       out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`);
       continue;
     }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      endParagraph();
+      endList();
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      i -= 1;
+      out.push(table(rows));
+      continue;
+    }
     const heading = line.match(/^#{1,6}\s+(.*)$/);
     const bullet = line.match(/^\s*[-*•]\s+(.*)$/);
-    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const numbered = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
     if (heading) {
       endParagraph();
       endList();
@@ -62,10 +123,12 @@ function markdown(source) {
       const kind = bullet ? 'ul' : 'ol';
       if (list !== kind) {
         endList();
-        out.push(`<${kind}>`);
+        // A numbered list split by an equation carries on from its own number.
+        const start = numbered && numbered[1] !== '1' ? ` start="${Number(numbered[1])}"` : '';
+        out.push(`<${kind}${start}>`);
         list = kind;
       }
-      out.push(`<li>${inline((bullet || numbered)[1])}</li>`);
+      out.push(`<li>${inline(bullet ? bullet[1] : numbered[2])}</li>`);
     } else if (!line.trim()) {
       endParagraph();
       endList();
@@ -84,7 +147,7 @@ function markdown(source) {
 // still writing, a tag can be half finished, so that part is hidden.
 
 function splitReply(raw, done) {
-  const text = raw.replace(/<\/?[a-z]*$/i, '');
+  const text = raw.replace(/<candidates>[\s\S]*?(?:<\/candidates>|$)/i, '').replace(/<\/?[a-z]*$/i, '');
   const answer = text.match(/<answer>\s*([\s\S]*?)\s*(?:<\/answer>|<explain>|<working>|$)/i);
   const explain = text.match(/<explain>\s*([\s\S]*?)\s*(?:<\/explain>|<working>|$)/i);
   const working = text.match(/<working>\s*([\s\S]*?)\s*(?:<\/working>|$)/i);
@@ -244,8 +307,9 @@ function paint(c) {
   if (answer) {
     const reveal = !c.shown;
     c.shown = true;
-    c.answer.className = `answer${answer.length > 140 ? ' long' : ''}${reveal ? ' reveal' : ''}`;
-    c.answer.innerHTML = markdown(answer);
+    const visible = answer.replace(/\\[a-z]+|[{}$^_\\]/gi, '').length; // what shows, not the LaTeX behind it
+    c.answer.className = `answer${visible > 140 ? ' long' : ''}${reveal ? ' reveal' : ''}`;
+    c.answer.innerHTML = markdown(answer, c.done);
   } else if (c.done) {
     c.answer.className = 'answer quiet';
     c.answer.textContent = 'No answer came back.';
@@ -254,9 +318,9 @@ function paint(c) {
     c.answer.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
   }
   c.explain.wrap.hidden = !explain;
-  if (explain) c.explain.body.innerHTML = markdown(explain);
+  if (explain) c.explain.body.innerHTML = markdown(explain, c.done);
   c.working.wrap.hidden = !working;
-  if (working) c.working.body.innerHTML = markdown(working);
+  if (working) c.working.body.innerHTML = markdown(working, c.done);
   c.thinking.wrap.hidden = !c.thoughts.trim();
   if (c.thoughts) c.thinking.body.textContent = c.thoughts.trim();
   c.actions.hidden = !(c.done && answer);
@@ -310,6 +374,28 @@ api.onRetry(() => {
   setBusy(true);
 });
 
+// The reply started over: it went in circles, or only repeated a wrong answer.
+api.onRethink((reason) => {
+  if (!card) return;
+  Object.assign(card, { text: '', thoughts: '', shown: false });
+  paint(card);
+  toast(
+    reason === 'repeat'
+      ? 'Same answer as before. Looking for a different one.'
+      : 'It was going in circles, so it started over with a shorter think.',
+  );
+});
+
+api.onToast((message) => toast(message));
+
+// Wrong answer picked one of the model's other answers: show that one.
+api.onReplace((reply) => {
+  if (!card) return;
+  card.text = reply;
+  card.shown = false;
+  paint(card);
+});
+
 api.onChunk((piece) => {
   if (!card) return;
   card.text += piece;
@@ -331,18 +417,55 @@ function finish() {
     paint(card);
   }
   card = null;
-  setBusy(false);
+  setBusy(autoRunning); // a new answer asked for by Check result comes mid-run
 }
 
 api.onDone(finish);
 
-// "Fill in": the Answer button turns into Stop until it is finished.
-api.onFill((state) => {
-  setBusy(state.on);
-  if (state.on) toast('Filling in. Press Esc to stop.');
-  else if (state.error) toast(state.error);
-  else if (!state.count) toast('Nothing to fill in here.');
-  else $('toast').hidden = true;
+// Fill in and the steps: the Answer button turns into Stop until they finish.
+let autoRunning = false;
+const RUN_TOASTS = ['Filling in. Press Esc to stop.', 'Running your blocks. Press Esc to stop.'];
+api.onAuto((run) => {
+  autoRunning = run.on;
+  setBusy(run.on);
+  markRunning(run.on && run.kind === 'steps' ? run.index : -1);
+  if (run.on) {
+    if (run.index == null) toast(run.kind === 'fill' ? RUN_TOASTS[0] : RUN_TOASTS[1]);
+  } else if (run.error) toast(run.error);
+  else if (run.stopped) toast('Stopped.');
+  else if (run.kind === 'fill' && !run.result) toast('Nothing to fill in here.');
+  else if (RUN_TOASTS.includes($('toast').textContent)) $('toast').hidden = true; // keep anything said during the run
+});
+
+// A block that is waiting shows the time left in place of its summary.
+let waitTimer = null;
+const timeLeft = (ms) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${s} s`;
+};
+api.onWait(({ index, until }) => {
+  clearInterval(waitTimer);
+  const el = $('blocks').children[index];
+  const sum = el && el.querySelector('.bsum');
+  const step = steps && steps.list[index];
+  if (!sum || !step) return;
+  if (!until) {
+    sum.textContent = summary(step);
+    return;
+  }
+  const tick = () => (sum.textContent = `${step.type === 'repeat' ? 'Next in' : 'Waiting'} ${timeLeft(until - Date.now())}`);
+  tick();
+  waitTimer = setInterval(tick, 250);
+});
+
+api.onVerdict(({ result, attempt }) => {
+  if (result === 'right') toast(attempt ? 'Right this time.' : 'Marked right.');
+  else if (result === 'wrong') toast('Marked wrong.');
+});
+
+api.onSpeak((words) => {
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(words));
 });
 
 api.onError((message) => {
@@ -775,6 +898,727 @@ for (const input of [$('baseUrl'), $('key')]) {
   input.addEventListener('keydown', (event) => event.key === 'Enter' && input.blur());
 }
 
+// ---------- steps: blocks that run after an answer ----------
+
+const PATHS = {
+  fill: 'M4 2.75 12.25 8l-3.6.85 2 4.15-1.5.7-2-4.15L4 12.25Z',
+  click: 'M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5ZM8 1.5V4M8 12v2.5M1.5 8H4M12 8h2.5',
+  find: 'M7 2.75a4.25 4.25 0 1 1 0 8.5 4.25 4.25 0 0 1 0-8.5ZM10.2 10.2l3.3 3.3',
+  type: 'M3.5 4.5h9M8 4.5v8M6.25 12.5h3.5',
+  keys: 'M2.5 4.5h11v7h-11ZM5 7h.01M8 7h.01M11 7h.01M5.5 9.25h5',
+  wait: 'M4.5 2.5h7M4.5 13.5h7M5.5 2.5c0 3 5 3.25 5 5.5s-5 2.5-5 5.5M10.5 2.5c0 3-5 3.25-5 5.5s5 2.5 5 5.5',
+  scroll: 'M8 2.5v11M5.25 5.25 8 2.5l2.75 2.75M5.25 10.75 8 13.5l2.75-2.75',
+  copy: 'M5.5 5.5V3.75c0-.7.55-1.25 1.25-1.25h5.5c.7 0 1.25.55 1.25 1.25v5.5c0 .7-.55 1.25-1.25 1.25H10.5M3.75 5.5h5.5c.7 0 1.25.55 1.25 1.25v5.5c0 .7-.55 1.25-1.25 1.25h-5.5c-.7 0-1.25-.55-1.25-1.25v-5.5c0-.7.55-1.25 1.25-1.25Z',
+  speak: 'M3 6.25h2.5L9 3.5v9L5.5 9.75H3ZM11.25 5.75a3 3 0 0 1 0 4.5M12.75 4a5.5 5.5 0 0 1 0 8',
+  mouse: 'M6 4.5 3 7.5l3 3M3.25 7.5H10a3 3 0 0 1 0 6H8.5',
+  verify: 'M5.4 8.2 7.15 9.9l3.45-3.8M8 2.25a5.75 5.75 0 1 1 0 11.5 5.75 5.75 0 0 1 0-11.5Z',
+  repeat: 'M2.75 8a5.25 5.25 0 0 1 9.4-3.2M13.25 8a5.25 5.25 0 0 1-9.4 3.2M12.5 2.25v2.9H9.6M3.5 13.75v-2.9h2.9',
+};
+
+const BLOCKS = [
+  { type: 'fill', title: 'Fill in', hint: 'Puts the answer into the question' },
+  { type: 'click', title: 'Click', hint: 'Point at a button once, found again each time' },
+  { type: 'find', title: 'Click by name', hint: 'Finds a button by its words, like Next' },
+  { type: 'verify', title: 'Check result', hint: 'Reads if it was marked right, and tries again if not' },
+  { type: 'repeat', title: 'Keep going', hint: 'Answers the next question too, on a timer if you like' },
+  { type: 'type', title: 'Type', hint: 'Types the answer or your own text' },
+  { type: 'keys', title: 'Press keys', hint: 'Enter, Tab or any shortcut' },
+  { type: 'wait', title: 'Wait', hint: 'Pauses before the next block' },
+  { type: 'scroll', title: 'Scroll', hint: 'Scrolls inside the frame' },
+  { type: 'copy', title: 'Copy answer', hint: 'Puts the answer on the clipboard' },
+  { type: 'speak', title: 'Read aloud', hint: 'Says the answer out loud' },
+  { type: 'mouse', title: 'Mouse back', hint: 'Puts the mouse back where it was' },
+];
+const BLOCK = Object.fromEntries(BLOCKS.map((b) => [b.type, b]));
+const DEFAULT_STEP = {
+  click: { at: null, target: null, adaptive: true, button: 'left', settle: true },
+  find: { text: '', where: 'frame', settle: true },
+  type: { source: 'answer', text: '', at: null, target: null },
+  keys: { keys: 'Enter' },
+  wait: { seconds: 1, unit: 'sec' },
+  verify: { onWrong: 'retry', tries: 2 },
+  repeat: { count: 10, seconds: 0, unit: 'sec' },
+  scroll: { direction: 'down', amount: 3 },
+};
+
+let steps = null; // { on, list }, owned here once loaded; every change is saved
+let openStep = null; // the block that shows its settings
+let keysFor = null; // the Press keys block that is listening for keys
+
+const svg = (d) => `<svg viewBox="0 0 16 16"><path d="${d}"/></svg>`;
+const keyLabel = (accelerator) => accelerator.replace(/Control/g, 'Ctrl').replace(/Super/g, 'Win').split('+').join(' + ');
+
+const KIND_WORDS = {
+  button: 'button',
+  splitbutton: 'button',
+  hyperlink: 'link',
+  menuitem: 'menu item',
+  tabitem: 'tab',
+  listitem: 'item',
+  treeitem: 'item',
+  radiobutton: 'option',
+  checkbox: 'check box',
+  edit: 'text box',
+  combobox: 'drop-down',
+  document: 'text box',
+  spinner: 'number box',
+};
+
+/** What a Click block points at: “Next” · button, or what it looks like. */
+function targetLabel(target) {
+  if (target.type === 'look') return target.name;
+  const kind = KIND_WORDS[target.type];
+  return kind ? `“${target.name}” · ${kind}` : `“${target.name}”`;
+}
+
+/** Seconds as the block shows them: "90 s" or "1.5 min". */
+const duration = (seconds, unit) =>
+  unit === 'min' ? `${Math.round((seconds / 60) * 100) / 100} min` : `${seconds} s`;
+
+function summary(step) {
+  switch (step.type) {
+    case 'click': {
+      if (!step.at) return 'Point at it';
+      const how = step.button === 'double' ? 'Double · ' : step.button === 'right' ? 'Right · ' : '';
+      return how + (step.adaptive && step.target ? targetLabel(step.target) : 'This exact spot');
+    }
+    case 'find':
+      return step.text ? `“${step.text}”` : 'Set the text';
+    case 'type':
+      return step.source === 'custom' ? (step.text ? `“${step.text}”` : 'Set the text') : 'The answer';
+    case 'keys':
+      return keyLabel(step.keys);
+    case 'wait':
+      return duration(step.seconds, step.unit);
+    case 'verify':
+      return step.onWrong === 'retry' ? `If wrong, ${step.tries} more ${step.tries === 1 ? 'try' : 'tries'}` : step.onWrong === 'stop' ? 'If wrong, stop' : 'If wrong, go on';
+    case 'repeat':
+      return `${step.count} more${step.seconds ? ` · ${duration(step.seconds, step.unit)} apart` : ''}`;
+    case 'scroll':
+      return `${step.direction === 'up' ? 'Up' : 'Down'} ${step.amount}`;
+    default:
+      return '';
+  }
+}
+
+let saveTimer = null;
+/** Save the blocks soon. Any change to them (not just to the presets) ends the chance to undo a preset. */
+function saveSteps(presetsOnly = false) {
+  if (!presetsOnly) setUndo(null);
+  $('stepsSum').textContent = steps.list.length ? `then ${steps.list.length} block${steps.list.length === 1 ? '' : 's'}` : 'add blocks below';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    api.setSteps(steps);
+  }, 200);
+}
+
+function refreshSummary(step) {
+  const el = $('blocks').querySelector(`[data-id="${step.id}"] .bsum`);
+  if (el) el.textContent = summary(step);
+}
+
+/** A small segmented control. */
+function segment(options, value, onPick) {
+  const box = document.createElement('div');
+  box.className = 'seg';
+  for (const [key, label] of options) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.classList.toggle('on', key === value);
+    button.addEventListener('click', () => {
+      for (const other of box.children) other.classList.toggle('on', other === button);
+      onPick(key);
+    });
+    box.appendChild(button);
+  }
+  return box;
+}
+
+function row(label, ...controls) {
+  const el = document.createElement('div');
+  el.className = 'brow';
+  const name = document.createElement('span');
+  name.textContent = label;
+  el.append(name, ...controls);
+  return el;
+}
+
+function textField(value, placeholder, onInput) {
+  const field = document.createElement('input');
+  field.type = 'text';
+  field.value = value;
+  field.placeholder = placeholder;
+  field.spellcheck = false;
+  field.addEventListener('input', () => onInput(field.value));
+  field.addEventListener('keydown', (event) => event.key === 'Enter' && field.blur());
+  return field;
+}
+
+/** Point at something on screen. Clicks and typing also learn what is there, to find it again later. */
+function spotPicker(step, emptyLabel, onPicked = () => {}) {
+  const box = document.createElement('div');
+  box.className = 'spot';
+  const value = document.createElement('span');
+  const pick = document.createElement('button');
+  pick.className = 'pill-button';
+  const show = () => {
+    if (step.target) value.textContent = targetLabel(step.target);
+    else if (step.at) value.textContent = step.type === 'click' ? 'This exact spot' : `${step.at.x}, ${step.at.y}`;
+    else value.textContent = emptyLabel;
+    value.title = value.textContent;
+    value.classList.toggle('unset', !step.at);
+    pick.textContent = step.at ? 'Point again' : 'Point';
+  };
+  pick.addEventListener('click', async () => {
+    pick.disabled = true;
+    pick.textContent = 'Pointing…';
+    const picked = await api.pickSpot(step.type);
+    pick.disabled = false;
+    if (picked) {
+      step.at = picked.at;
+      step.target = picked.target;
+      saveSteps();
+      refreshSummary(step);
+      onPicked();
+    }
+    show();
+  });
+  box.append(value, pick);
+  if (step.type === 'type') {
+    const clear = document.createElement('button');
+    clear.className = 'mini';
+    clear.title = 'Type where the cursor is';
+    clear.setAttribute('aria-label', 'Type where the cursor is');
+    clear.innerHTML = svg('M5 5l6 6M11 5l-6 6');
+    clear.addEventListener('click', () => {
+      step.at = null;
+      step.target = null;
+      saveSteps();
+      show();
+    });
+    box.appendChild(clear);
+  }
+  show();
+  return box;
+}
+
+/** After a click, wait for the page to change (the next question coming in) before going on. */
+function settleRow(step, changed) {
+  const label = document.createElement('span');
+  label.className = 'grow';
+  label.textContent = 'Wait for the page';
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.className = 'switch';
+  toggle.checked = step.settle !== false;
+  toggle.setAttribute('aria-label', 'Wait for the page to change');
+  toggle.addEventListener('change', () => {
+    step.settle = toggle.checked;
+    changed();
+  });
+  return row('Then', label, toggle);
+}
+
+/** A length of time in seconds or minutes (up to an hour), kept in step.seconds. */
+function timeField(step, least, changed) {
+  const field = document.createElement('input');
+  field.type = 'number';
+  const show = () => {
+    const min = step.unit === 'min';
+    field.min = String(min ? 0 : least);
+    field.max = min ? '60' : '3600';
+    field.step = min ? '0.5' : least ? '0.5' : '1';
+    field.value = String(min ? Math.round((step.seconds / 60) * 100) / 100 : step.seconds);
+  };
+  field.addEventListener('change', () => {
+    const value = Number(field.value) || 0;
+    const seconds = step.unit === 'min' ? value * 60 : value;
+    step.seconds = Math.min(3600, Math.max(least, Math.round(seconds * 10) / 10));
+    show();
+    changed();
+  });
+  show();
+  const unit = segment([['sec', 'sec'], ['min', 'min']], step.unit || 'sec', (v) => {
+    step.unit = v;
+    show();
+    changed();
+  });
+  unit.classList.add('units');
+  return [field, unit];
+}
+
+function blockBody(step) {
+  const body = document.createElement('div');
+  body.className = 'block-body';
+  const changed = () => {
+    saveSteps();
+    refreshSummary(step);
+  };
+  switch (step.type) {
+    case 'fill':
+    case 'copy':
+    case 'speak':
+    case 'mouse': {
+      const note = document.createElement('p');
+      note.className = 'bnote';
+      note.textContent = BLOCK[step.type].hint + '.';
+      body.appendChild(note);
+      break;
+    }
+    case 'click': {
+      const findRow = row(
+        'Find',
+        segment([['each', 'Each time'], ['spot', 'Same spot']], step.adaptive ? 'each' : 'spot', (v) => {
+          step.adaptive = v === 'each';
+          changed();
+        }),
+      );
+      findRow.hidden = !step.target;
+      body.append(
+        row(
+          'What',
+          spotPicker(step, 'Not set', () => {
+            findRow.hidden = !step.target;
+            queueMeasure();
+          }),
+        ),
+        findRow,
+        row('Click', segment([['left', 'Left'], ['double', 'Double'], ['right', 'Right']], step.button, (v) => ((step.button = v), changed()))),
+        settleRow(step, changed),
+      );
+      break;
+    }
+    case 'find':
+      body.append(
+        row('Text', textField(step.text, 'Next', (v) => ((step.text = v.slice(0, 80)), changed()))),
+        row('Look', segment([['frame', 'In the frame'], ['screen', 'Whole screen']], step.where, (v) => ((step.where = v), changed()))),
+        settleRow(step, changed),
+      );
+      break;
+    case 'type': {
+      const custom = textField(step.text, 'Text to type', (v) => ((step.text = v.slice(0, 500)), changed()));
+      const customRow = row('Text', custom);
+      customRow.hidden = step.source !== 'custom';
+      body.append(
+        row('Type', segment([['answer', 'The answer'], ['custom', 'Text']], step.source, (v) => {
+          step.source = v;
+          customRow.hidden = v !== 'custom';
+          changed();
+          queueMeasure();
+        })),
+        customRow,
+        row('Where', spotPicker(step, 'Where the cursor is')),
+      );
+      break;
+    }
+    case 'keys': {
+      const cap = document.createElement('button');
+      cap.className = 'keycap';
+      cap.textContent = keyLabel(step.keys);
+      cap.addEventListener('click', () => {
+        const listening = keysFor === step;
+        keysFor = listening ? null : step;
+        cap.classList.toggle('recording', !listening);
+        cap.textContent = listening ? keyLabel(step.keys) : 'Press keys…';
+        cap.dataset.listen = String(!listening);
+      });
+      body.append(row('Keys', cap));
+      break;
+    }
+    case 'wait':
+      body.append(row('Wait', ...timeField(step, 0.1, changed)));
+      break;
+    case 'verify': {
+      const tries = row('Tries', segment([['1', '1'], ['2', '2'], ['3', '3']], String(step.tries), (v) => ((step.tries = Number(v)), changed())));
+      tries.hidden = step.onWrong !== 'retry';
+      const note = document.createElement('p');
+      note.className = 'bnote';
+      note.textContent = 'Put it after the block that checks the answer.';
+      body.append(
+        note,
+        row('If wrong', segment([['retry', 'Try again'], ['continue', 'Go on'], ['stop', 'Stop']], step.onWrong, (v) => {
+          step.onWrong = v;
+          tries.hidden = v !== 'retry';
+          changed();
+          queueMeasure();
+        })),
+        tries,
+      );
+      break;
+    }
+    case 'repeat': {
+      const count = document.createElement('input');
+      count.type = 'number';
+      count.min = '1';
+      count.max = '500';
+      count.value = String(step.count);
+      count.addEventListener('change', () => {
+        step.count = Math.min(500, Math.max(1, Math.round(Number(count.value) || 10)));
+        count.value = String(step.count);
+        changed();
+      });
+      const more = document.createElement('span');
+      more.className = 'unit';
+      more.textContent = 'more questions';
+      const note = document.createElement('p');
+      note.className = 'bnote';
+      note.textContent = 'Put it last. Stops when the page stops changing, or on Esc.';
+      body.append(note, row('Answer', count, more), row('Wait', ...timeField(step, 0, changed)));
+      break;
+    }
+    case 'scroll': {
+      const amount = document.createElement('input');
+      amount.type = 'number';
+      amount.min = '1';
+      amount.max = '30';
+      amount.value = String(step.amount);
+      amount.addEventListener('change', () => {
+        step.amount = Math.min(30, Math.max(1, Math.round(Number(amount.value) || 3)));
+        amount.value = String(step.amount);
+        changed();
+      });
+      body.append(
+        row('Way', segment([['down', 'Down'], ['up', 'Up']], step.direction, (v) => ((step.direction = v), changed()))),
+        row('Amount', amount),
+      );
+      break;
+    }
+  }
+  return body;
+}
+
+// Recording keys for a Press keys block: anything goes, including plain Enter or Esc.
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if (!keysFor) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return;
+    let key = null;
+    if (/^Key[A-Z]$/.test(event.code)) key = event.code.slice(3);
+    else if (/^Digit\d$/.test(event.code)) key = event.code.slice(5);
+    else if (/^F\d{1,2}$/.test(event.code)) key = event.code;
+    else if (event.code === 'Escape') key = 'Escape';
+    else if (event.code === 'Backspace') key = 'Backspace';
+    else key = KEY_NAMES[event.code] || null;
+    if (!key) return;
+    const mods = [];
+    if (event.ctrlKey) mods.push('Control');
+    if (event.altKey) mods.push('Alt');
+    if (event.shiftKey) mods.push('Shift');
+    if (event.metaKey) mods.push('Super');
+    const step = keysFor;
+    keysFor = null;
+    step.keys = [...mods, key].join('+');
+    saveSteps();
+    refreshSummary(step);
+    const cap = $('blocks').querySelector(`[data-id="${step.id}"] .keycap`);
+    if (cap) {
+      cap.classList.remove('recording');
+      cap.textContent = keyLabel(step.keys);
+    }
+  },
+  true,
+);
+
+function blockElement(step) {
+  const el = document.createElement('div');
+  el.className = `block${openStep === step.id ? ' open' : ''}`;
+  el.dataset.id = step.id;
+  el.innerHTML = `
+    <div class="block-head">
+      <span class="grip" title="Drag to move"><svg viewBox="0 0 10 14"><circle cx="3" cy="3" r="1.1"/><circle cx="7" cy="3" r="1.1"/><circle cx="3" cy="7" r="1.1"/><circle cx="7" cy="7" r="1.1"/><circle cx="3" cy="11" r="1.1"/><circle cx="7" cy="11" r="1.1"/></svg></span>
+      <span class="bicon">${svg(PATHS[step.type])}</span>
+      <span class="btitle"></span>
+      <span class="bsum"></span>
+      <button class="mini remove" title="Remove" aria-label="Remove block">${svg('M5 5l6 6M11 5l-6 6')}</button>
+    </div>
+    <div class="fold"></div>`;
+  el.querySelector('.btitle').textContent = BLOCK[step.type].title;
+  el.querySelector('.bsum').textContent = summary(step);
+  el.querySelector('.fold').appendChild(blockBody(step));
+  el.querySelector('.block-head').addEventListener('click', (event) => {
+    if (event.target.closest('.grip, .remove')) return;
+    const open = !el.classList.contains('open');
+    for (const other of $('blocks').children) other.classList.toggle('open', other === el && open);
+    openStep = open ? step.id : null;
+  });
+  el.querySelector('.remove').addEventListener('click', () => {
+    steps.list = steps.list.filter((s) => s !== step);
+    if (keysFor === step) keysFor = null;
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 220);
+    saveSteps();
+  });
+  dragToMove(el, el.querySelector('.grip'));
+  return el;
+}
+
+/** Drag a block by its grip; the others glide out of the way. */
+function dragToMove(el, grip) {
+  let drag = null;
+  const glide = (other, from) => {
+    const shift = from - other.getBoundingClientRect().top;
+    other.animate([{ transform: `translateY(${shift}px)` }, { transform: 'none' }], {
+      duration: 220,
+      easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+    });
+  };
+  const move = (event) => {
+    if (!drag) return;
+    const box = $('blocks');
+    const list = [...box.children].filter((child) => !child.classList.contains('leaving'));
+    const index = list.indexOf(el);
+    // Swap when the pointer passes the middle of the block next to it. The
+    // neighbour moves, not this block, so the drag never loses hold of it.
+    const pointer = event.clientY - box.getBoundingClientRect().top;
+    const next = list[index + 1];
+    const prev = list[index - 1];
+    const swap = (other, otherGoesBefore) => {
+      const oldTop = el.offsetTop;
+      const otherTop = other.getBoundingClientRect().top;
+      if (otherGoesBefore) el.before(other);
+      else el.after(other);
+      drag.startY += el.offsetTop - oldTop; // keep the block under the pointer
+      glide(other, otherTop);
+    };
+    if (next && pointer > next.offsetTop + next.offsetHeight / 2) swap(next, true);
+    else if (prev && pointer < prev.offsetTop + prev.offsetHeight / 2) swap(prev, false);
+    el.style.transform = `translateY(${event.clientY - drag.startY}px)`;
+  };
+  const drop = () => {
+    if (!drag) return;
+    drag = null;
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', drop);
+    window.removeEventListener('pointercancel', drop);
+    el.classList.remove('dragging');
+    el.animate([{ transform: el.style.transform || 'none' }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+    el.style.transform = '';
+    const order = [...$('blocks').children].map((child) => child.dataset.id);
+    steps.list.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    saveSteps();
+  };
+  grip.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    // Folded blocks are easier to move around.
+    for (const other of $('blocks').children) other.classList.remove('open');
+    openStep = null;
+    drag = { startY: event.clientY };
+    el.classList.add('dragging');
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', drop);
+    window.addEventListener('pointercancel', drop);
+  });
+}
+
+/** Draw the blocks; new ones rise in one after another. */
+function showBlocks(animate = false) {
+  const box = $('blocks');
+  box.textContent = '';
+  steps.list.forEach((step, i) => {
+    const el = blockElement(step);
+    if (animate) {
+      el.classList.add('entering');
+      el.style.animationDelay = `${i * 45}ms`;
+    }
+    box.appendChild(el);
+  });
+}
+
+function renderBlocks() {
+  if (!Array.isArray(steps.presets)) steps.presets = [];
+  showBlocks();
+  $('stepsOn').checked = steps.on;
+  saveSteps();
+  clearTimeout(saveTimer); // nothing changed yet
+  saveTimer = null;
+}
+
+function markRunning(index) {
+  [...$('blocks').children].forEach((el, i) => el.classList.toggle('running', i === index));
+}
+
+// The add menu: every kind of block, two to a row.
+for (const kind of BLOCKS) {
+  const item = document.createElement('button');
+  item.className = 'menu-item';
+  item.title = kind.hint;
+  item.innerHTML = `${svg(PATHS[kind.type])}<span></span>`;
+  item.querySelector('span').textContent = kind.title;
+  item.addEventListener('click', () => {
+    if (steps.list.length >= 24) return toast('That is the most blocks there can be.');
+    const step = { id: Math.random().toString(36).slice(2, 10), type: kind.type, ...structuredClone(DEFAULT_STEP[kind.type] || {}) };
+    steps.list.push(step);
+    // Blocks with settings open straight away.
+    openStep = DEFAULT_STEP[kind.type] ? step.id : null;
+    for (const other of $('blocks').children) other.classList.remove('open');
+    const el = blockElement(step);
+    el.classList.add('entering');
+    $('blocks').appendChild(el);
+    setPanel(null);
+    saveSteps();
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  });
+  $('blockMenu').appendChild(item);
+}
+
+/** Open the add menu ('add'), the presets ('presets'), or neither. */
+function setPanel(which) {
+  const add = $('addBlock').closest('.add');
+  if (which === 'presets') renderPresets();
+  add.classList.toggle('open', which === 'add');
+  add.classList.toggle('presets', which === 'presets');
+  $('addBlock').setAttribute('aria-expanded', String(which === 'add'));
+  $('presetsBtn').setAttribute('aria-expanded', String(which === 'presets'));
+}
+
+$('addBlock').addEventListener('click', () => setPanel($('addBlock').getAttribute('aria-expanded') === 'true' ? null : 'add'));
+$('presetsBtn').addEventListener('click', () => setPanel($('presetsBtn').getAttribute('aria-expanded') === 'true' ? null : 'presets'));
+
+// ---------- presets: ready-made sets of blocks, and your own ----------
+
+const READY_PRESETS = [
+  {
+    name: 'Answer them all',
+    list: [{ type: 'fill' }, { type: 'find', text: 'Check', where: 'screen' }, { type: 'verify' }, { type: 'find', text: 'Next', where: 'screen' }, { type: 'repeat' }],
+  },
+  { name: 'Fill in, check, next', list: [{ type: 'fill' }, { type: 'find', text: 'Check', where: 'screen' }, { type: 'verify' }, { type: 'find', text: 'Next', where: 'screen' }] },
+  { name: 'Fill in, then next', list: [{ type: 'fill' }, { type: 'find', text: 'Next', where: 'screen' }] },
+  { name: 'Fill in and submit', list: [{ type: 'fill' }, { type: 'find', text: 'Submit', where: 'screen' }] },
+  { name: 'Type it and press Enter', list: [{ type: 'type' }, { type: 'keys', keys: 'Enter' }] },
+  { name: 'Copy the answer', list: [{ type: 'copy' }] },
+  { name: 'Read it aloud', list: [{ type: 'speak' }] },
+];
+const MAX_PRESETS = 20;
+
+const newId = () => Math.random().toString(36).slice(2, 10);
+/** Fresh copies of a preset's blocks, with every setting filled in. */
+const blocksOf = (list) => list.map((block) => ({ ...structuredClone(DEFAULT_STEP[block.type] || {}), ...structuredClone(block), id: newId() }));
+
+let undoList = null;
+let undoTimer = null;
+function setUndo(list) {
+  undoList = list;
+  clearTimeout(undoTimer);
+  $('undoPreset').hidden = !list;
+  if (list) undoTimer = setTimeout(() => setUndo(null), 10000);
+}
+
+function loadPreset(preset) {
+  const before = steps.list;
+  steps.list = blocksOf(preset.list);
+  openStep = null;
+  keysFor = null;
+  setPanel(null);
+  showBlocks(true);
+  saveSteps();
+  setUndo(before.length ? before : null); // the blocks it replaced can come back
+}
+
+function presetElement(preset, saved) {
+  const row = document.createElement('div');
+  row.className = 'preset';
+  const load = document.createElement('button');
+  load.className = 'preset-load';
+  const icons = document.createElement('span');
+  icons.className = 'preset-icons';
+  icons.innerHTML = preset.list
+    .slice(0, 3)
+    .map((block) => svg(PATHS[block.type]))
+    .join('');
+  const name = document.createElement('span');
+  name.className = 'preset-name';
+  name.textContent = preset.name;
+  load.append(icons, name);
+  load.addEventListener('click', () => loadPreset(preset));
+  row.appendChild(load);
+  if (saved) {
+    const remove = document.createElement('button');
+    remove.className = 'mini';
+    remove.setAttribute('aria-label', `Remove ${preset.name}`);
+    remove.innerHTML = svg('M5 5l6 6M11 5l-6 6');
+    remove.addEventListener('click', () => {
+      steps.presets = steps.presets.filter((other) => other !== preset);
+      saveSteps(true);
+      renderPresets();
+    });
+    row.appendChild(remove);
+  }
+  return row;
+}
+
+/** Name the blocks you have and keep them as a preset. A name already used is updated. */
+function saveRow() {
+  const row = document.createElement('div');
+  row.className = 'preset-save';
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.placeholder = 'Name these blocks';
+  name.maxLength = 40;
+  name.spellcheck = false;
+  const save = document.createElement('button');
+  save.className = 'pill-button';
+  save.textContent = 'Save';
+  const update = () => (save.disabled = !name.value.trim() || !steps.list.length);
+  name.addEventListener('input', update);
+  name.addEventListener('keydown', (event) => event.key === 'Enter' && !save.disabled && save.click());
+  save.addEventListener('click', () => {
+    const title = name.value.trim().slice(0, 40);
+    const same = steps.presets.find((preset) => preset.name.toLowerCase() === title.toLowerCase());
+    if (!same && steps.presets.length >= MAX_PRESETS) return toast('That is the most presets there can be.');
+    const list = structuredClone(steps.list);
+    if (same) same.list = list;
+    else steps.presets.push({ id: newId(), name: title, list });
+    saveSteps(true);
+    renderPresets();
+    toast(same ? `Updated “${title}”.` : `Saved “${title}”.`);
+  });
+  update();
+  row.append(name, save);
+  return row;
+}
+
+function renderPresets() {
+  const menu = $('presetMenu');
+  menu.textContent = '';
+  for (const preset of READY_PRESETS) menu.appendChild(presetElement(preset, false));
+  if (steps.presets.length) {
+    const label = document.createElement('div');
+    label.className = 'preset-label';
+    label.textContent = 'Saved';
+    menu.appendChild(label);
+    for (const preset of steps.presets) menu.appendChild(presetElement(preset, true));
+  }
+  menu.appendChild(saveRow());
+}
+
+$('undoPreset').addEventListener('click', () => {
+  if (!undoList) return;
+  steps.list = undoList;
+  setUndo(null);
+  showBlocks(true);
+  saveSteps();
+});
+$('stepsOn').addEventListener('change', () => {
+  steps.on = $('stepsOn').checked;
+  saveSteps();
+});
+$('runSteps').addEventListener('click', () => {
+  if (!steps.list.length) return toast('Add a block first.');
+  if (busy) return;
+  // A change still waiting to be saved goes first, so the run uses it.
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    api.setSteps(steps);
+  }
+  api.runSteps();
+});
+
 // ---------- render ----------
 
 function render(next) {
@@ -801,6 +1645,10 @@ function render(next) {
   $('downloadList').textContent = '';
   for (const name of suggestions) $('downloadList').append(new Option(name));
   $('versionInfo').textContent = state.version;
+  if (!steps && state.steps) {
+    steps = structuredClone(state.steps);
+    renderBlocks();
+  }
   setBusy(busy);
 }
 
