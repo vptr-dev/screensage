@@ -13,8 +13,14 @@ screen. Fit the frame around it, press **Answer**, done.
   (fractions, roots, powers). The working out folds away underneath.
 - **Explain mode.** A short "how to get there" so you can reach the same
   answer yourself.
-- **Fill in.** Clicks, types or drags the answer into the question inside the
-  frame (never presses submit). Esc stops it.
+- **Fill in.** Works out what kind of question it is (boxes to type in,
+  options to pick, cards to drag into place or order, pairs to match, a
+  dropdown, a spot on a picture) and puts the answer in, then looks again to
+  check and fixes what is missing. Never presses submit; Esc stops it. With
+  blocks set up, the Fill in button runs your blocks.
+- **Follow-ups.** Ask for a change ("make it more niche", "shorter",
+  "another one") and you get a new answer; ask "why?" and you get a reply
+  while the answer stays.
 - **Steps.** Line up blocks that run after each answer: Fill in, Click, Click
   by name, Type, Press keys, Wait, Scroll, Copy answer, Read aloud, Mouse
   back, Check result and Keep going. Drag them into order in
@@ -37,7 +43,8 @@ screen. Fit the frame around it, press **Answer**, done.
 - **No going in circles.** If the thinking keeps doubling back, it starts
   over with a shorter, more decisive think.
 - **Glass frame.** Drag it by its toolbar, pull any edge or corner, or draw a
-  new area. It can shade everything outside it.
+  new area. It can shade everything outside it, and fades out of the way
+  while blocks run.
 - **Recents.** Past answers with their captures; click a capture to see it
   full size.
 - **Timer.** A tiny glass countdown (or stopwatch) that floats on top.

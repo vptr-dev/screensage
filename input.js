@@ -73,7 +73,8 @@ public static class SageInput {
       ControlType.Edit, ControlType.RadioButton, ControlType.CheckBox, ControlType.ComboBox,
       ControlType.ListItem, ControlType.Button, ControlType.Hyperlink, ControlType.Text,
       ControlType.Slider, ControlType.Spinner, ControlType.TreeItem, ControlType.DataItem,
-      ControlType.MenuItem, ControlType.TabItem, ControlType.SplitButton
+      ControlType.MenuItem, ControlType.TabItem, ControlType.SplitButton,
+      ControlType.Group, ControlType.Image, ControlType.Custom
     };
     var conditions = new List<Condition>();
     foreach (var t in types) conditions.Add(new PropertyCondition(AutomationElement.ControlTypeProperty, t));
@@ -94,10 +95,22 @@ public static class SageInput {
         string type = info.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
         string name = (info.Name ?? "").Trim();
         if (type == "text" && name.Length == 0) continue;
+        // Pictures and named boxes (cards to drag, places to drop, pictures to pick); not whole sections.
+        if ((type == "group" || type == "image" || type == "custom") &&
+            (name.Length == 0 || name.Length > 120 || box.Width * box.Height > w * h / 3.0)) continue;
         string value = "", state = "";
         object p;
         if ((type == "edit" || type == "combobox" || type == "spinner") && e.TryGetCurrentPattern(ValuePattern.Pattern, out p))
           value = ((ValuePattern)p).Current.Value;
+        string range = "";
+        if (type == "slider" && e.TryGetCurrentPattern(RangeValuePattern.Pattern, out p)) {
+          var rv = ((RangeValuePattern)p).Current;
+          if (!double.IsNaN(rv.Value) && !double.IsNaN(rv.Minimum) && !double.IsNaN(rv.Maximum) && rv.Maximum > rv.Minimum) {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            value = rv.Value.ToString(inv);
+            range = ",\"min\":" + rv.Minimum.ToString(inv) + ",\"max\":" + rv.Maximum.ToString(inv);
+          }
+        }
         if (e.TryGetCurrentPattern(TogglePattern.Pattern, out p))
           state = ((TogglePattern)p).Current.ToggleState == ToggleState.On ? "checked" : "not checked";
         else if ((type == "radiobutton" || type == "listitem" || type == "treeitem" || type == "dataitem") && e.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p))
@@ -105,7 +118,8 @@ public static class SageInput {
         if (n > 0) b.Append(',');
         b.Append("{\"type\":").Append(Json(type)).Append(",\"name\":").Append(Json(name))
           .Append(",\"value\":").Append(Json(value)).Append(",\"state\":").Append(Json(state))
-          .Append(",\"x\":").Append((int)cx).Append(",\"y\":").Append((int)cy).Append('}');
+          .Append(",\"x\":").Append((int)cx).Append(",\"y\":").Append((int)cy)
+          .Append(",\"w\":").Append((int)box.Width).Append(",\"h\":").Append((int)box.Height).Append(range).Append('}');
         n++;
       } catch { }
     }
@@ -189,6 +203,34 @@ public static class SageInput {
     worker.IsBackground = true;
     worker.Start();
     return worker.Join(6000) ? result : "[]";
+  }
+
+  // The entries a dropdown holds, even while it is closed.
+  static string Dropdown(int x, int y, uint skipPid) {
+    IntPtr hwnd = WindowAt(x, y, skipPid);
+    if (hwnd == IntPtr.Zero) return "[]";
+    AutomationElement root = AutomationElement.FromHandle(hwnd);
+    var point = new System.Windows.Point(x, y);
+    var boxes = root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox));
+    foreach (AutomationElement box in boxes) {
+      if (!box.Current.BoundingRectangle.Contains(point)) continue;
+      var items = box.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem));
+      var b = new StringBuilder("[");
+      int n = 0;
+      foreach (AutomationElement item in items) {
+        if (n >= 200) break;
+        string name = (item.Current.Name ?? "").Trim();
+        if (name.Length == 0) continue;
+        if (n++ > 0) b.Append(',');
+        b.Append("{\"name\":").Append(Json(name)).Append('}');
+      }
+      return b.Append(']').ToString();
+    }
+    return "[]";
+  }
+
+  public static string Entries(int x, int y, uint skipPid) {
+    return Timed(delegate () { return Dropdown(x, y, skipPid); });
   }
 
   public static string Elements(int x, int y, int w, int h, uint skipPid) {
@@ -379,6 +421,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       [Console]::Out.WriteLine('ok ' + [SageInput]::At([int]$p[1], [int]$p[2], [uint32]$p[3]))
       continue
     }
+    if ($p[0] -eq 'options') {
+      [Console]::Out.WriteLine('ok ' + [SageInput]::Entries([int]$p[1], [int]$p[2], [uint32]$p[3]))
+      continue
+    }
     if ($p[0] -eq 'wake') {
       [Console]::Out.WriteLine('ok ' + [SageInput]::Wake([int]$p[1], [int]$p[2], [uint32]$p[3]))
       continue
@@ -492,6 +538,10 @@ module.exports = {
   /** The named controls under a point (real pixels), any size. */
   async under(point, skipPid) {
     return list(await run(`at ${round(point.x)} ${round(point.y)} ${round(skipPid)}`), 'at');
+  },
+  /** The entries of the dropdown at a point (real pixels), even while it is closed. */
+  async options(point, skipPid) {
+    return list(await run(`options ${round(point.x)} ${round(point.y)} ${round(skipPid)}`), 'options');
   },
   /** Walk every control in the window under a point (real pixels), so a browser builds its page's controls. */
   async wake(point, skipPid) {

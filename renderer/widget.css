@@ -844,6 +844,23 @@ input[type='range']:hover::-webkit-slider-thumb {
   background: var(--fill);
   box-shadow: inset 0 0 0 0.5px var(--hair-strong);
   animation: rise 0.3s var(--ease) both;
+  transition: opacity 0.26s var(--ease), transform 0.26s var(--ease);
+}
+
+.toast.swap {
+  animation: swap 0.32s var(--ease) both;
+}
+
+.toast.leaving {
+  animation: none;
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+@keyframes swap {
+  from {
+    opacity: 0.25;
+  }
 }
 
 /* ---------- bottom ---------- */

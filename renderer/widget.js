@@ -209,11 +209,30 @@ $('timerBtn').addEventListener('click', () => api.toggleTimer());
 $('closeBtn').addEventListener('click', () => api.close());
 
 let toastTimer = null;
+// A toast slides in, swaps its words softly when a new one comes, and fades out (never blinks).
 function toast(message) {
-  $('toast').textContent = message;
-  $('toast').hidden = false;
+  const el = $('toast');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => ($('toast').hidden = true), 4500);
+  el.classList.remove('leaving');
+  if (!el.hidden && el.textContent !== message) {
+    el.classList.remove('swap');
+    void el.offsetWidth; // restart the animation
+    el.classList.add('swap');
+  }
+  el.textContent = message;
+  el.hidden = false;
+  toastTimer = setTimeout(hideToast, 4500);
+}
+
+function hideToast() {
+  const el = $('toast');
+  if (el.hidden) return;
+  clearTimeout(toastTimer);
+  el.classList.add('leaving');
+  toastTimer = setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove('leaving', 'swap');
+  }, 280);
 }
 
 // ---------- the answer card ----------
@@ -434,7 +453,7 @@ api.onAuto((run) => {
   } else if (run.error) toast(run.error);
   else if (run.stopped) toast('Stopped.');
   else if (run.kind === 'fill' && !run.result) toast('Nothing to fill in here.');
-  else if (RUN_TOASTS.includes($('toast').textContent)) $('toast').hidden = true; // keep anything said during the run
+  else if (RUN_TOASTS.includes($('toast').textContent)) hideToast(); // keep anything said during the run
 });
 
 // A block that is waiting shows the time left in place of its summary.

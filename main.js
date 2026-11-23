@@ -42,7 +42,7 @@ const systemPrompt = (explain) =>
     'Find the question or problem in it and solve it.',
     'Reply in exactly this format, with nothing before or after it:',
     '<answer>',
-    'The final answer only: the value, option, word or one short sentence. Only if the capture holds several separate questions, give one answer per line.',
+    'your answer here',
     '</answer>',
     ...(explain
       ? [
@@ -54,11 +54,27 @@ const systemPrompt = (explain) =>
     '<working>',
     'How you got the answer, as a few short numbered steps, with the key equation of a step on its own line.',
     '</working>',
+    'What goes in <answer>:',
+    '- Only the final answer: the value, the option, the word or one short sentence. Never repeat the question or its instructions.',
+    '- If the question tells you to do something, give what to do it to: for "Click the red circle" the answer is "The red circle", and for "Set the slider to 70" it is "70".',
+    '- Several separate questions, boxes or gaps: one answer per line, in order.',
+    '- Several options to pick: each on its own line.',
+    '- Matching, or sorting things into groups: each pair on its own line, like "Dog → Mammals".',
+    '- Putting things in order: one per line, numbered, like "1. first" then "2. second".',
+    '- A word written one letter to a box: the whole word.',
+    '- A switch or toggle: "On" or "Off", how it should end up, not how it is now.',
     `If there is no question in the capture, put a one-sentence description of what it shows in <answer> and leave ${explain ? 'the other sections' : '<working>'} empty.`,
     'Formatting: write all maths in LaTeX, inline as $...$ and on its own line as $$...$$ (for example $\\frac{3}{4}$, $x^2 + 1$, $\\sqrt{2}$, $45^\\circ$, $3 \\times 4$). Use Markdown for the rest: **bold** for the key value, short numbered steps, a table only when it really helps.',
   ].join('\n');
 
 // Added when a model keeps second-guessing itself and the thinking starts over.
+// A reply that only copied the format back isn't an answer.
+const BAD_ANSWER = /^(?:your answer here|the final answer only)/i;
+const goodAnswer = (reply) => {
+  const answer = answerOf(reply);
+  return !!answer && !BAD_ANSWER.test(answer);
+};
+
 const CALM =
   'Keep your reasoning short and decisive: work it out once, check it once, then give the answer. Do not keep going back over it.';
 
@@ -97,44 +113,75 @@ const FILL_ROUNDS = 5;
 const KIND_NAMES = {
   edit: 'text box', radiobutton: 'option', checkbox: 'checkbox', combobox: 'dropdown', listitem: 'list item',
   button: 'button', hyperlink: 'link', text: 'text', slider: 'slider', spinner: 'number box', treeitem: 'item', dataitem: 'item',
+  group: 'box', image: 'picture', custom: 'item', menuitem: 'menu item', tabitem: 'tab', splitbutton: 'button', place: 'place to drop into', shape: 'coloured shape',
 };
 // Buttons that would hand the answer in. Fill in never presses these.
 const SUBMIT_WORDS = /\b(submit|next|finish|check|send|done|continue|save|turn in|hand in)\b/i;
 
-function describeElement(e, index) {
-  let line = `${index + 1}. ${KIND_NAMES[e.type] || e.type} "${e.name}"`;
-  if (e.type === 'edit' || e.type === 'combobox' || e.type === 'spinner') line += ` holding "${e.value}"`;
+/** Where a point (real pixels) is on the 0–1000 grid of the frame. */
+function onGrid(rect, p) {
+  const dip = screen.screenToDipPoint(p);
+  const g = (v, start, size) => Math.min(1000, Math.max(0, Math.round(((v - start) / size) * 1000)));
+  return `${g(dip.x, rect.x, rect.width)},${g(dip.y, rect.y, rect.height)}`;
+}
+
+function describeElement(e, index, rect) {
+  let line = `#${index + 1}: ${KIND_NAMES[e.type] || e.type} "${text(e.name, 140)}"`;
+  if (e.type === 'edit' || e.type === 'combobox' || e.type === 'spinner') line += ` holding "${text(e.value, 80)}"`;
+  if (e.type === 'slider' && e.max != null) line += ` set to ${e.value} (goes from ${e.min} to ${e.max})`;
   if (e.state) line += ` (${e.state})`;
+  if (rect) line += ` at ${onGrid(rect, e)}`;
   return line;
 }
 
-const fillPrompt = (answer, elements) =>
+const usable = (elements) => elements.some((e) => e.type !== 'text' || e.name.length <= 40);
+
+const fillPrompt = (answer, elements, rect, before) =>
   [
     'You are entering an answer into the question shown in this screen capture, using the mouse and keyboard.',
     `The answer to enter:\n${toPlain(answer)}`,
-    ...(elements.length
+    'First work out what kind of question it is and how it takes its answer, then do exactly that. For example:',
+    '- a text or number box: type the answer in it (several boxes: each part in its own box)',
+    '- options to pick (one, or several "select all that apply"): click each one that is part of the answer, and only those',
+    '- cards or words to drag into boxes, gaps, a list or an order: drag each one to its place, one drag per card (things listed as "place to drop into" are the empty boxes and gaps, in order from top left)',
+    '- matching pairs: drag each one onto its partner (only if dragging did nothing last time, click one and then its partner)',
+    '- a dropdown: choose the entry; a slider or number line: drag the handle or click the spot',
+    '- a picture or map to click on: click the right spot',
+    'The answer may be written differently from how the question wants it (a list, arrows, letters, words): turn it into what this question needs.',
+    'Positions are on a 0 to 1000 grid over the capture: x across from the left edge, y down from the top edge.',
+    'The capture has faint blue grid lines every 100, numbered along its top and right edges, and a small dark tag with each thing\'s number by its top-left corner. For a place with no number (an empty box or gap, a spot on a picture), read its position off the grid lines.',
+    ...(usable(elements)
       ? [
-          'These are the things inside the capture you can use, by number:',
-          ...elements.map(describeElement),
-          'Reply with commands only, one per line, nothing else. The commands are:',
-          '- click N : click thing N (an option, checkbox or list item)',
-          '- type N <text> : put <text> into text box N, replacing what is there',
-          '- choose N <entry> : pick <entry> in dropdown N',
-          '- drag N M : drag thing N onto thing M',
+          'These are the things inside the capture you can use. Each has a number after # (not part of its name), and where it is on the grid:',
+          ...elements.map((e, i) => describeElement(e, i, rect)),
         ]
-      : [
-          'Positions are on a 0 to 1000 grid over the capture: x across from the left edge, y down from the top edge.',
-          'Reply with commands only, one per line, nothing else. The commands are:',
-          '- click X Y : click at that position (aim for the centre of the option or box)',
-          '- type <text> : type into the box that was just clicked',
-          '- drag X1 Y1 X2 Y2 : drag from one position to another',
-        ]),
+      : ['Nothing in the capture could be read as a control, so use positions.']),
+    'Reply with commands only, one per line, nothing else. The commands are:',
+    ...(usable(elements) && !elements.some((e) => TYPING.has(e.type))
+      ? ['There are no text boxes here, so do not type: click, choose or drag instead.']
+      : []),
+    ...(usable(elements)
+      ? [
+          '- click #N : click thing #N',
+          '- type #N <text> : put <text> into text box #N, replacing what is there',
+          '- choose #N <entry> : pick <entry> in dropdown #N',
+          '- drag #N #M : drag thing #N onto thing #M',
+          '- drag "<words>" to "<words>" : the same, naming both things by the exact words in the list (best for cards: drag "Berlin" to "Germany", drag "3" to "empty box 1")',
+          '- drag #N X Y : drag thing #N to a place that is not in the list',
+          'Always write the # before a thing\'s number, so "click #4" clicks thing #4 and never an option called 4.',
+        ]
+      : []),
+    '- click X Y : click at a position (aim for the centre)',
+    '- type <text> : type into the box that was just clicked',
+    '- drag X1 Y1 X2 Y2 : drag from one position to another',
     '- key enter : press a key (enter, tab, down or up)',
     '- look : stop and get a new capture first (for example after opening a custom list)',
     '- done : the answer is fully entered',
-    'Rules: only enter the answer, never press submit, next, check or finish. Leave options that are already right alone. Use the answer exactly as given.',
+    'Rules: only enter the answer, never press submit, next, check or finish. Leave anything that is already right alone (do not click a ticked box again). Use the answer as given.',
+    ...(before ? [`On the question before this one, the answer went in with: ${before}. Use that again only if this question works the same way.`] : []),
     'An example reply, for a different question:',
-    ...(elements.length ? ['type 3 42', 'click 7', 'done'] : ['click 412 388', 'type 42', 'done']),
+    ...(usable(elements) ? ['type #3 42', 'click #7', 'drag #9 #12', 'drag #10 455 620', 'click 300 210', 'done'] : ['click 412 388', 'type 42', 'done']),
+    'Only use numbers that are in the list above. Anything without a number (an empty box, a gap, a spot on a picture) is X Y from the grid: two numbers, like drag #10 455 620 or click 300 210.',
   ].join('\n');
 
 const DEFAULTS = {
@@ -895,17 +942,80 @@ async function captureRect(rect, { full = false, shrink = 1 } = {}) {
   return image;
 }
 
-/** Capture the frame. Any of our windows in the way step aside for a moment. */
+// ---------- fading our windows ----------
+// Our windows never blink in and out of sight: they fade.
+
+const fading = new Map(); // window -> { timer, resolve }
+
+/** Fade a window to an opacity. Resolves once it is there (at once if it is hidden). */
+function fadeTo(win, to, ms = 200) {
+  if (!win || win.isDestroyed()) return Promise.resolve();
+  const current = fading.get(win);
+  if (current) {
+    clearInterval(current.timer);
+    fading.delete(win);
+    current.resolve();
+  }
+  const from = win.getOpacity();
+  if (Math.abs(from - to) < 0.005 || !win.isVisible() || ms <= 0) {
+    win.setOpacity(to);
+    return Promise.resolve();
+  }
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      if (win.isDestroyed()) {
+        clearInterval(timer);
+        fading.delete(win);
+        return resolve();
+      }
+      const t = Math.min(1, (Date.now() - started) / ms);
+      win.setOpacity(from + (to - from) * t * t * (3 - 2 * t));
+      if (t >= 1) {
+        clearInterval(timer);
+        fading.delete(win);
+        resolve();
+      }
+    }, 15);
+    fading.set(win, { timer, resolve });
+  });
+}
+
+// While blocks run (and between the questions of a Keep going run) the frame stays faded out,
+// rather than vanishing for every look at the screen.
+let frameQuiet = false;
+let frameBack = null;
+
+async function quietFrame() {
+  clearTimeout(frameBack);
+  frameQuiet = true;
+  await Promise.all([...overlays].map((win) => fadeTo(win, 0, 260)));
+  await wait(60);
+}
+
+function frameReturns(delay = 700) {
+  clearTimeout(frameBack);
+  frameBack = setTimeout(() => {
+    if (filling || picking) return;
+    if (chain && running) return frameReturns(delay); // the next question is being answered
+    frameQuiet = false;
+    for (const win of overlays) fadeTo(win, OVERLAY_OPACITY, 340);
+  }, delay);
+}
+
+/** Capture the frame. Any of our windows in the way fade aside for a moment. */
 async function captureFrame() {
   const inTheWay = [widget, timerWin].filter(
     (win) => win && !win.isDestroyed() && win.isVisible() && overlapArea(win.getBounds(), settings.frame) > 0,
   );
-  for (const win of inTheWay) win.setOpacity(0);
-  if (inTheWay.length) await wait(120);
+  if (inTheWay.length) {
+    await Promise.all(inTheWay.map((win) => fadeTo(win, 0, 180)));
+    await wait(60);
+  }
   try {
     return await captureRect(settings.frame);
   } finally {
-    for (const win of inTheWay) win.setOpacity(1);
+    for (const win of inTheWay) fadeTo(win, 1, 240);
   }
 }
 
@@ -1008,7 +1118,7 @@ async function writeAnswer({ build = () => conversation, think = settings.answer
           baseUrl: baseUrlFor(providerId),
           messages,
           think: resets >= 2 ? false : think,
-          temperature: repeats ? Math.min(1, (temperature ?? 0.2) + 0.3 * repeats) : temperature,
+          temperature: repeats ? Math.min(1, (temperature ?? 0.2) + 0.3 * repeats) : (temperature ?? 0),
           signal: turn.signal,
           onChunk: (piece) => {
             text += piece;
@@ -1024,6 +1134,11 @@ async function writeAnswer({ build = () => conversation, think = settings.answer
         });
         // A provider that sends everything at once finishes before it can be stopped: keep it.
         if (held && running === controller) tell('answer:chunk', held);
+        if (!goodAnswer(reply) && repeats < 2) {
+          repeats += 1;
+          tell('answer:rethink', 'repeat');
+          continue;
+        }
         if (rejects) {
           // Its own list of best answers gives one that isn't marked wrong.
           const fresh = candidatesOf(reply).find((c) => !rejects(c));
@@ -1123,9 +1238,58 @@ async function sendAfter(message, channel, payload, options) {
   });
 }
 
+// A follow-up that only asks about the answer ("why?", "how did you get that?") gets a reply and
+// leaves the answer as it is. Anything else ("make it more niche", "shorter", "in French") changes it.
+const JUST_ASKING =
+  /^\s*(?:why|how(?!\s+about)|what\s+(?:does|do|is|are|did|was|were)\b|explain|can\s+you\s+explain|could\s+you\s+explain|are\s+you\s+sure|is\s+(?:that|it|this)\s+(?:right|correct|true)|where\s+did|tell\s+me\s+(?:why|how|more\s+about)|so\s+(?:why|how)|wdym|huh)\b/i;
+
+/** The answers given to the question so far (not replies to "why?"). */
+function givenAnswers(fromIndex) {
+  const out = [];
+  for (const m of conversation.slice(fromIndex)) {
+    const answer = m.role === 'assistant' && !m.talk ? answerOf(m.content) : '';
+    if (answer && !out.some((a) => sameAnswer(a, answer))) out.push(answer);
+  }
+  return out;
+}
+
 const followUp = (input) => {
-  const question = text(input, 2000).trim();
-  if (question) sendAfter(question, 'answer:followup', question);
+  const said = text(input, 2000).trim();
+  if (!said || !conversation || running) return;
+  const asking = JUST_ASKING.test(said) && !/\b(?:change|instead|another|different|more|less|make\s+it)\b/i.test(said);
+  const earlier = givenAnswers(1);
+  const current = latestAnswer();
+  const note = asking
+    ? [
+        `The user asks about your answer: "${said}"`,
+        'Reply to them in <answer>, briefly and plainly. Keep the same final answer unless they show it is wrong.',
+      ].join('\n')
+    : [
+        `The user wants the answer changed: "${said}"`,
+        `Your current answer is: ${current}`,
+        'Give a NEW answer in <answer> that does exactly what they ask (for example: more niche means rarer and more specific; shorter means fewer words; another means a different one).',
+        `It must be different from ${earlier.length > 1 ? 'every answer given so far' : 'the current answer'}${earlier.length > 1 ? `: ${earlier.join('; ')}` : ''}, unless they ask to keep it.`,
+        'Keep the same reply format as before.',
+      ].join('\n');
+  const index = conversation.length;
+  const build = ({ repeats } = {}) =>
+    conversation.map((m, i) =>
+      i === index
+        ? { role: 'user', content: `${note}${repeats ? '\nYou gave the same answer again. Give a different one that does what they ask.' : ''}` }
+        : { role: m.role, content: m.content, ...(m.images ? { images: m.images } : {}) },
+    );
+  sendAfter(said, 'answer:followup', said, {
+    build,
+    temperature: asking ? undefined : 0.7,
+    rejects: asking ? undefined : (answer) => earlier.some((a) => sameAnswer(a, answer)),
+  }).then((reply) => {
+    if (!reply || !asking) return;
+    // A reply to "why?" isn't a new answer: Fill in and the blocks keep using the answer before it.
+    const last = conversation[conversation.length - 1];
+    const question = conversation[conversation.length - 2];
+    if (last && last.role === 'assistant') last.talk = true;
+    if (question && question.role === 'user') question.talk = true;
+  });
 };
 
 /**
@@ -1136,10 +1300,11 @@ const followUp = (input) => {
 function rethink({ said = [] } = {}) {
   if (!conversation || running || conversation[conversation.length - 1].role !== 'assistant') return Promise.resolve(null);
   let question = conversation.length - 1;
-  while (question > 0 && !(conversation[question].role === 'user' && conversation[question].content !== RETRY)) question -= 1;
+  while (question > 0 && !(conversation[question].role === 'user' && conversation[question].content !== RETRY && !conversation[question].talk)) question -= 1;
   const rejected = [];
-  for (const m of conversation.slice(question + 1)) {
-    const answer = m.role === 'assistant' ? answerOf(m.content) : '';
+  // After a follow-up like "make it more niche", the answers before it are out too.
+  for (const m of conversation.slice(question > 1 ? 2 : question + 1)) {
+    const answer = m.role === 'assistant' && !m.talk ? answerOf(m.content) : '';
     if (answer && !rejected.some((r) => sameAnswer(r, answer))) rejected.push(answer);
   }
   // What the quiz itself said ("Not quite, the answer is 8") is the best clue there is.
@@ -1304,40 +1469,121 @@ function answerOf(content) {
 }
 
 function latestAnswer() {
-  const last = conversation && [...conversation].reverse().find((m) => m.role === 'assistant');
+  const last = conversation && [...conversation].reverse().find((m) => m.role === 'assistant' && !m.talk);
   return last ? answerOf(last.content) : '';
 }
 
 const unquote = (s) => s.trim().replace(/^["'“‘<](.*)["'”’>]$/, '$1');
 
-/** Read the model's commands, one per line. Anything it can't follow is skipped. */
-function readCommands(reply, count) {
+/**
+ * Read the model's commands, one per line. Things can be named by number (#3), or by their words
+ * ("drag Dog to Mammals") when a model forgets the numbers; places by two grid numbers. Anything
+ * it can't follow is skipped. `elements` is the list of things (or just how many there are).
+ */
+function readCommands(reply, elements) {
+  const list = Array.isArray(elements) ? elements : [];
+  const count = Array.isArray(elements) ? elements.length : Number(elements) || 0;
   const actions = [];
   let look = false;
   const id = (n) => {
     const i = Number(n) - 1;
     return i >= 0 && i < count ? i : null;
   };
+  const hashes = /#\d/.test(reply);
+  const plain = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  // A thing by its words: the same name, else one that starts with them, else one that holds them.
+  const byName = (words) => {
+    const want = plain(words);
+    if (!want) return null;
+    let best = null;
+    list.forEach((e, i) => {
+      const name = plain(e.name);
+      if (!name) return;
+      const score = name === want ? 3 : want.length >= 2 && name.startsWith(want) ? 2 : want.length >= 3 && name.includes(want) ? 1 : 0;
+      if (score && (!best || score > best.score || (score === best.score && name.length < best.length))) best = { i, score, length: name.length };
+    });
+    return best ? best.i : null;
+  };
+  // "#3" is thing 3. A bare 3 is thing 3 too, unless the reply numbers things with # and a thing is called "3".
+  // In quotes it is always a name: drag "8" means the card that says 8, never thing 8.
+  const thing = (token) => {
+    const bare = String(token || '').trim().replace(/^(?:the|thing|item|option|box|number)\s+/i, '');
+    const quoted = /^["“‘']/.test(bare);
+    const t = unquote(bare);
+    let m;
+    if ((m = t.match(/^#\s*(\d+)$/))) return id(m[1]);
+    // "B" is the option labelled "B." or "(B)".
+    if (/^[a-h]$/i.test(t)) {
+      const lettered = list.findIndex((e) => new RegExp(`^\\s*\\(?${t}\\s*[.):]`, 'i').test(e.name));
+      if (lettered >= 0) return lettered;
+    }
+    if (/^\d+$/.test(t)) {
+      const named = list.findIndex((e) => plain(e.name) === t);
+      if (named >= 0 && (hashes || quoted || id(t) === null)) return named;
+      return quoted ? null : id(t);
+    }
+    return list.length ? byName(t) : null;
+  };
+  const pair = (s) => {
+    const m = String(s).trim().match(/^#?\s*\(?\s*(\d+)\s*[,\s]\s*(\d+)\s*\)?$/);
+    return m ? { x: +m[1], y: +m[2] } : null;
+  };
+  const skipped = []; // commands that named nothing it could find
   for (const raw of reply.split('\n')) {
     const line = raw.replace(/[`*]/g, '').replace(/^\s*(?:[-•>]|\d+[.)])\s+/, '').trim();
     let m;
+    const before = actions.length;
     if (/^look\b/i.test(line)) look = true;
-    // "click 9 option "3/4"" still means click 9.
-    else if (count && (m = line.match(/^click\s+#?(\d+)(?:\s|$)/i)) && id(m[1]) !== null) actions.push({ type: 'click', target: id(m[1]) });
-    else if (count && (m = line.match(/^type\s+#?(\d+)\s+(.+)$/i)) && id(m[1]) !== null) {
+    else if ((m = line.match(/^click\s+(.+)$/i))) {
+      const rest = m[1].trim();
+      const at = pair(rest);
+      if (at) actions.push({ type: 'click', at });
+      else {
+        // "click 9 option "3/4"" still means click 9; "click Whale" means the thing called Whale.
+        const lead = rest.match(/^#?\s*\d+(?=\s|$)/);
+        const target = lead ? thing(lead[0]) : thing(rest);
+        if (target !== null) actions.push({ type: 'click', target });
+      }
+    } else if (count && (m = line.match(/^type\s+#?(\d+)\s+(.+)$/i)) && id(m[1]) !== null) {
       // A model that copies the command's description back has nothing to type.
       if (!/\btext box\b|<text>/i.test(m[2])) actions.push({ type: 'type', target: id(m[1]), text: unquote(m[2]) });
-    }
+    } else if ((m = line.match(/^type\s+(.+)$/i))) actions.push({ type: 'type', text: unquote(m[1]) });
     else if (count && (m = line.match(/^choose\s+#?(\d+)\s+(.+)$/i)) && id(m[1]) !== null) actions.push({ type: 'choose', target: id(m[1]), text: unquote(m[2]) });
-    else if (count && (m = line.match(/^drag\s+#?(\d+)\s+(?:on(?:to)?\s+|to\s+)?#?(\d+)\s*$/i)) && id(m[1]) !== null && id(m[2]) !== null) {
-      actions.push({ type: 'drag', from: id(m[1]), to: id(m[2]) });
-    } else if (!count && (m = line.match(/^click\s+(\d+)[\s,]+(\d+)\s*$/i))) actions.push({ type: 'click', at: { x: +m[1], y: +m[2] } });
-    else if (!count && (m = line.match(/^type\s+(.+)$/i))) actions.push({ type: 'type', text: unquote(m[1]) });
-    else if (!count && (m = line.match(/^drag\s+(\d+)[\s,]+(\d+)[\s,]+(?:to\s+)?(\d+)[\s,]+(\d+)\s*$/i))) {
-      actions.push({ type: 'drag', fromAt: { x: +m[1], y: +m[2] }, toAt: { x: +m[3], y: +m[4] } });
+    else if ((m = line.match(/^drag\s+(.+)$/i))) {
+      const rest = m[1].trim();
+      // Quoted names can hold the joining words themselves: drag "Back to school" to "Autumn".
+      const named = rest.match(/^(["“].+?["”])\s+(?:on(?:to)?|to|into|in|at|->|→)\s+(["“].+?["”])$/i);
+      const split = named ? [named[1], named[2]] : rest.split(/\s+(?:on(?:to)?|to|into|in|at|->|→)\s+/i);
+      let from = null;
+      let to = null;
+      if (split.length === 2) {
+        from = pair(split[0]) || thing(split[0]);
+        to = pair(split[1]) || thing(split[1]);
+      } else {
+        const numbers = rest.replace(/[(),#]/g, ' ').trim().split(/\s+/);
+        if (numbers.every((n) => /^\d+$/.test(n))) {
+          // "drag #3 142 160 5 97 304": both things with where they are, copied from the list.
+          if (numbers.length === 6) [from, to] = [thing(`#${numbers[0]}`), thing(`#${numbers[3]}`)];
+          else if (numbers.length === 4) [from, to] = [{ x: +numbers[0], y: +numbers[1] }, { x: +numbers[2], y: +numbers[3] }];
+          else if (numbers.length === 3) [from, to] = [thing(`#${numbers[0]}`), { x: +numbers[1], y: +numbers[2] }];
+          else if (numbers.length === 2) [from, to] = [thing(rest.split(/\s+/)[0]), thing(rest.split(/\s+/)[1])];
+        } else if (numbers.length === 2) [from, to] = [thing(numbers[0]), thing(numbers[1])];
+      }
+      // A place to drop into is never what gets dragged: the model wrote them the wrong way round.
+      const isPlace = (t) => typeof t === 'number' && list[t] && (list[t].type === 'place' || (list[t].type === 'group' && list[t].w > 120));
+      if (from !== null && to !== null && isPlace(from) && !isPlace(to) && typeof to === 'number') [from, to] = [to, from];
+      if (from !== null && to !== null) {
+        const action = { type: 'drag' };
+        if (typeof from === 'number') action.from = from;
+        else action.fromAt = from;
+        if (typeof to === 'number') action.to = to;
+        else action.toAt = to;
+        actions.push(action);
+      }
     } else if ((m = line.match(/^key\s+(enter|tab|down|up)\b/i))) actions.push({ type: 'key', key: m[1].toLowerCase() });
+    if (actions.length === before && /^(?:click|type|choose|drag)\b/i.test(line)) skipped.push(line.slice(0, 120));
   }
-  return { actions: actions.slice(0, 16), look };
+  return { actions: actions.slice(0, 20), look, skipped };
 }
 
 /** A point on the 0–1000 grid of the capture, as a real screen pixel. */
@@ -1348,7 +1594,7 @@ function gridToScreen(rect, point) {
 }
 
 async function clickAt(p) {
-  await input.move(p.x, p.y);
+  await glide(p);
   await wait(120);
   await input.down();
   await input.up();
@@ -1373,30 +1619,124 @@ async function perform(action, rect, elements, signal) {
     }
     await input.type(action.text.slice(0, 2000));
   } else if (action.type === 'choose') {
-    // Opening the dropdown and typing the entry picks it, in browsers and most apps.
+    // What the dropdown holds, so a longer answer ("The sky is blue") still picks the right entry.
+    const held = await input.options(target, process.pid).catch(() => []);
+    action.text = bestEntry(action.text, held.map((o) => o.name));
     await clickAt(target);
     await wait(350);
-    await input.type(action.text.slice(0, 200));
-    await wait(200);
-    await input.key('enter');
+    // A list the page built itself shows its entries as things to click.
+    const shown = (await frameElements(rect).catch(() => [])).filter((e) => ['listitem', 'menuitem', 'dataitem', 'treeitem'].includes(e.type));
+    action.text = bestEntry(action.text, shown.map((e) => e.name));
+    const wanted = simple(action.text);
+    const entry = shown.find((e) => simple(e.name) === wanted);
+    if (entry) await clickAt(entry);
+    else {
+      // A plain dropdown: typing the entry picks it, in browsers and most apps.
+      await input.type(action.text.slice(0, 200));
+      await wait(200);
+      await input.key('enter');
+    }
   } else if (action.type === 'key') {
     await input.key(action.key);
   } else if (action.type === 'drag') {
     const from = action.from != null ? elements[action.from] : gridToScreen(rect, action.fromAt);
     const to = action.to != null ? elements[action.to] : gridToScreen(rect, action.toAt);
-    await input.move(from.x, from.y);
-    await wait(120);
-    await input.down();
-    // Pages only notice a drag if the pointer moves in between.
-    for (let step = 1; step <= 16; step++) {
+    if (process.env.SAGE_DEBUG) console.log(`drag from ${from.x},${from.y} to ${to.x},${to.y}`);
+    await dragBetween(from, to, check);
+  } else if (action.type === 'slider') {
+    // Click along the track, then arrow keys for the exact value.
+    const k = (action.value - target.min) / (target.max - target.min || 1);
+    const across = target.w >= target.h;
+    await clickAt(across ? { x: target.x - target.w / 2 + k * target.w, y: target.y } : { x: target.x, y: target.y + target.h / 2 - k * target.h });
+    await wait(200);
+    let side = 0;
+    for (let n = 0; n < 40; n++) {
       check();
-      await input.move(from.x + ((to.x - from.x) * step) / 16, from.y + ((to.y - from.y) * step) / 16);
-      await wait(18);
+      const now = (await frameElements(rect).catch(() => [])).find((e) => e.type === 'slider' && e.name === target.name);
+      if (!now || Number(now.value) === action.value) break;
+      const way = Number(now.value) < action.value ? 1 : -1;
+      if (side && way !== side) break; // stepped past it: the slider has no such value
+      side = way;
+      await input.combo(way > 0 ? 'right' : 'left');
+      await wait(60);
     }
-    await wait(80);
+  } else if (action.type === 'sort') {
+    // One card at a time into its spot, looking again after each, since the rest shift along.
+    const order = action.order.map((i) => elements[i]);
+    for (let n = 0; n <= order.length; n++) {
+      check();
+      const now = await frameElements(rect).catch(() => []);
+      const cards = order.map((c) => now.find((e) => e.type === c.type && e.name === c.name));
+      if (cards.some((c) => !c)) break;
+      const reach = (key) => Math.max(...cards.map((c) => c[key])) - Math.min(...cards.map((c) => c[key]));
+      const along = reach('y') >= reach('x') ? 'y' : 'x';
+      const slots = [...cards].sort((a, b) => a[along] - b[along]);
+      const wrong = cards.findIndex((c, k) => c !== slots[k]);
+      if (wrong < 0) break;
+      const spot = slots[wrong];
+      const nudge = Math.max(4, (along === 'y' ? spot.h : spot.w) * 0.35); // just before what is there
+      await dragBetween(cards[wrong], { x: spot.x, y: spot.y, [along]: spot[along] - nudge }, check);
+      await wait(350);
+    }
+  }
+  await wait(350);
+}
+
+/** Whether a text has this name in it as whole words. */
+function saysName(text, name) {
+  const safe = String(name).trim().replace(/[.*+?^$()|[\]{}\\/]/g, '\\$&');
+  return !!safe && new RegExp('(?<![\\p{L}\\p{N}])' + safe + '(?![\\p{L}\\p{N}])', 'iu').test(text);
+}
+
+/** The dropdown entry a piece of text means: the same words, or the one entry it names. */
+function bestEntry(value, entries) {
+  const want = simple(value);
+  const same = entries.find((n) => simple(n) === want);
+  if (same) return same;
+  const said = entries.filter((n) => saysName(value, n));
+  return said.length === 1 ? said[0] : value;
+}
+
+/** Press, travel smoothly and let go. The button always comes back up, even if the run is stopped halfway. */
+async function dragBetween(from, to, check) {
+  await glide(from);
+  await wait(150);
+  await input.down();
+  try {
+    await wait(120);
+    // Pages only start a drag once the pointer has moved a little while held, and only
+    // drop it where it was hovering: so nudge, travel smoothly, then settle before letting go.
+    await input.move(from.x + 4, from.y + 4);
+    await wait(120);
+    const steps = 28;
+    for (let step = 1; step <= steps; step++) {
+      check();
+      const t = step / steps;
+      const k = t * t * (3 - 2 * t);
+      await input.move(from.x + 4 + (to.x - from.x - 4) * k, from.y + 4 + (to.y - from.y - 4) * k);
+      await wait(16);
+    }
+    await input.move(to.x + 1, to.y);
+    await wait(90);
+    await input.move(to.x, to.y);
+    await wait(180);
+  } finally {
     await input.up();
   }
-  await wait(300);
+}
+
+/** Move the pointer smoothly to a point (real pixels), so it doesn't jump about the screen. */
+async function glide(p) {
+  const start = screen.dipToScreenPoint(screen.getCursorScreenPoint());
+  const distance = Math.hypot(p.x - start.x, p.y - start.y);
+  const steps = Math.min(14, Math.max(1, Math.round(distance / 60)));
+  for (let step = 1; step < steps; step++) {
+    const t = step / steps;
+    const k = t * t * (3 - 2 * t);
+    await input.move(start.x + (p.x - start.x) * k, start.y + (p.y - start.y) * k);
+    await wait(12);
+  }
+  await input.move(p.x, p.y);
 }
 
 /** The controls inside the frame. Browsers switch their accessibility on at the first ask, so ask twice. */
@@ -1437,17 +1777,15 @@ async function aside(area, fn) {
   const ours = [widget, timerWin, viewer].filter(
     (win) => win && !win.isDestroyed() && win.isVisible() && (!area || overlapArea(win.getBounds(), area) > 0),
   );
-  for (const win of ours) {
-    win.setOpacity(0);
-    win.setIgnoreMouseEvents(true);
-  }
+  for (const win of ours) win.setIgnoreMouseEvents(true);
+  if (ours.length) await Promise.all(ours.map((win) => fadeTo(win, 0, 180)));
   try {
     return await fn();
   } finally {
     for (const win of ours) {
       if (win.isDestroyed()) continue;
       win.setIgnoreMouseEvents(false);
-      win.setOpacity(1);
+      fadeTo(win, 1, 260);
     }
   }
 }
@@ -1455,39 +1793,885 @@ async function aside(area, fn) {
 const around = (p) => ({ x: p.x - 4, y: p.y - 4, width: 8, height: 8 });
 
 /** Fill in: the model looks at the frame (and the controls in it) and enters the answer. */
-async function fillCore(answer, controller) {
+// How the last answer went in (say "drag, drag, drag"), as a hint for the next question on the same page.
+let lastFill = null;
+
+// A tiny 3×5 font for the numbers drawn on the picture the model sees.
+const GLYPHS = {
+  0: '111101101101111', 1: '010110010010111', 2: '111001111100111', 3: '111001111001111', 4: '101101111001001',
+  5: '111100111001111', 6: '111100111101111', 7: '111001001001001', 8: '111101111101111', 9: '111101111001111',
+};
+
+/**
+ * The capture with faint grid lines every 100 (numbered along the top and left) and a small dark tag
+ * with each thing's number beside it, so the model can tell what is where: which card is #4, and
+ * where an empty box or a spot on a picture is on the grid.
+ */
+function markImage(image, rect, elements) {
+  const { width: W, height: H } = image.getSize();
+  const px = Buffer.from(image.toBitmap()); // BGRA
+  const s = Math.max(2, Math.round(Math.max(W, H) / 520));
+  const blend = (x, y, rgb, a) => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = (y * W + x) * 4;
+    px[i] = px[i] * (1 - a) + rgb[2] * a;
+    px[i + 1] = px[i + 1] * (1 - a) + rgb[1] * a;
+    px[i + 2] = px[i + 2] * (1 - a) + rgb[0] * a;
+  };
+  const tagSize = (str) => ({ w: str.length * 4 * s + s + 2, h: 5 * s + 2 * s });
+  const tag = (str, x0, y0, background) => {
+    const { w, h } = tagSize(str);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) blend(x0 + x, y0 + y, background, 0.82);
+    [...str].forEach((ch, n) => {
+      const glyph = GLYPHS[ch];
+      if (!glyph) return;
+      for (let gy = 0; gy < 5; gy++)
+        for (let gx = 0; gx < 3; gx++)
+          if (glyph[gy * 3 + gx] === '1')
+            for (let dy = 0; dy < s; dy++)
+              for (let dx = 0; dx < s; dx++) blend(x0 + 1 + s + n * 4 * s + gx * s + dx, y0 + s + gy * s + dy, [255, 255, 255], 1);
+    });
+  };
+  // The grid, faint, numbered along the top and left edges.
+  for (let g = 100; g < 1000; g += 100) {
+    const x = Math.round((g / 1000) * W);
+    const y = Math.round((g / 1000) * H);
+    for (let yy = 0; yy < H; yy += 1) if (yy % 6 < 3) blend(x, yy, [0, 150, 255], 0.35);
+    for (let xx = 0; xx < W; xx += 1) if (xx % 6 < 3) blend(xx, y, [0, 150, 255], 0.35);
+    tag(String(g), x + 2, 1, [0, 90, 170]);
+    tag(String(g), W - tagSize(String(g)).w - 1, y + 2, [0, 90, 170]); // on the right, where pages rarely put things
+  }
+  // Each thing's number, just above its top-left corner (long text needs none).
+  const real = screen.dipToScreenRect(null, rect);
+  const [kx, ky] = [W / real.width, H / real.height];
+  elements.forEach((e, i) => {
+    if (e.type === 'text' && e.name.length > 40) return;
+    const str = String(i + 1);
+    const { w, h } = tagSize(str);
+    const left = (e.x - (e.w || 0) / 2 - real.x) * kx;
+    const top = (e.y - (e.h || 0) / 2 - real.y) * ky;
+    tag(str, Math.round(Math.min(W - w, Math.max(0, left - w + 3))), Math.round(Math.min(H - h, Math.max(0, top - h + 3))), [20, 20, 20]);
+  });
+  return nativeImage.createFromBitmap(px, { width: W, height: H });
+}
+
+/**
+ * Empty places to drop things into, found in the picture: empty boxes (a border with nothing inside)
+ * and blank gaps (a line with nothing on it). Pages rarely name these, so Windows can't list them,
+ * but a drag-into-the-boxes question needs them. Returned as things in real screen pixels.
+ */
+function emptyPlaces(image, rect, elements) {
+  const { width: W, height: H } = image.getSize();
+  if (W * H > 3e6 || W < 40 || H < 40) return [];
+  const px = image.toBitmap(); // BGRA
+  const real = screen.dipToScreenRect(null, rect);
+  const k = W / rect.width; // picture pixels per screen unit
+  // The page's background: its most common colour.
+  const counts = new Map();
+  for (let y = 0; y < H; y += 3) {
+    for (let x = 0; x < W; x += 3) {
+      const i = (y * W + x) * 4;
+      const key = ((px[i] >> 4) << 8) | ((px[i + 1] >> 4) << 4) | (px[i + 2] >> 4);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  const bgKey = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const bg = [((bgKey >> 8) & 15) * 16 + 8, ((bgKey >> 4) & 15) * 16 + 8, (bgKey & 15) * 16 + 8];
+  const ink = (x, y) => {
+    const i = (y * W + x) * 4;
+    return Math.abs(px[i] - bg[0]) + Math.abs(px[i + 1] - bg[1]) + Math.abs(px[i + 2] - bg[2]) > 70;
+  };
+  const inkShare = (x0, y0, x1, y1) => {
+    [x0, y0, x1, y1] = [Math.max(0, Math.round(x0)), Math.max(0, Math.round(y0)), Math.min(W - 1, Math.round(x1)), Math.min(H - 1, Math.round(y1))];
+    if (x1 < x0 || y1 < y0) return 1;
+    let n = 0;
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (ink(x, y)) n++;
+    return n / ((x1 - x0 + 1) * (y1 - y0 + 1));
+  };
+  // Horizontal lines, solid or dashed: long runs of ink with clear rows just above and below.
+  const minLength = 34 * k;
+  const maxLength = 420 * k;
+  const gap = Math.max(6, Math.round(9 * k));
+  const rows = [];
+  for (let y = 2; y < H - 2; y++) {
+    let start = -1;
+    let last = -1;
+    let n = 0;
+    const close = () => {
+      const length = last - start + 1;
+      if (start < 0 || length < minLength || length > maxLength || n / length < 0.33) return;
+      const off = Math.max(3, Math.round(3 * k));
+      if (inkShare(start, y - off, last, y - off) > 0.25 || inkShare(start, y + off, last, y + off) > 0.25) return; // inside text or a picture
+      rows.push({ y, x0: start, x1: last });
+    };
+    for (let x = 0; x < W; x++) {
+      if (!ink(x, y)) continue;
+      if (start >= 0 && x - last > gap) {
+        close();
+        start = -1;
+      }
+      if (start < 0) {
+        start = x;
+        n = 0;
+      }
+      last = x;
+      n++;
+    }
+    close();
+  }
+  // Rows of the same line (a line 2 or 3 pixels thick) become one.
+  const lines = [];
+  for (const r of rows) {
+    const line = lines.find((l) => r.y - l.y1 <= 1 && Math.abs(l.x0 - r.x0) <= 3 * k && Math.abs(l.x1 - r.x1) <= 3 * k);
+    if (line) line.y1 = r.y;
+    else lines.push({ y0: r.y, y1: r.y, x0: r.x0, x1: r.x1 });
+  }
+  const thin = lines.filter((l) => l.y1 - l.y0 + 1 <= 4 * k);
+  const places = [];
+  const used = new Set();
+  const m = 3 * k;
+  // An upright edge somewhere in a band of columns (rounded corners put it a little past the line's end).
+  const upright = (xFrom, xTo, y0, y1) => {
+    let best = 0;
+    for (let x = Math.max(0, Math.round(xFrom)); x <= Math.min(W - 1, Math.round(xTo)); x++) best = Math.max(best, inkShare(x, y0, x, y1));
+    return best;
+  };
+  // Empty boxes: a line with another above it, and nothing between them.
+  for (const bottom of thin) {
+    let best = null;
+    for (const top of thin) {
+      if (top === bottom || used.has(top) || top.y1 >= bottom.y0) continue;
+      const height = bottom.y0 - top.y1;
+      if (height < 16 * k || height > 170 * k) continue;
+      const overlap = Math.min(top.x1, bottom.x1) - Math.max(top.x0, bottom.x0);
+      if (overlap < 0.8 * (top.x1 - top.x0) || overlap < 0.8 * (bottom.x1 - bottom.x0)) continue;
+      if (!best || top.y1 > best.y1) best = top;
+    }
+    if (!best) continue;
+    const x0 = Math.max(best.x0, bottom.x0);
+    const x1 = Math.min(best.x1, bottom.x1);
+    if (inkShare(x0 + m, best.y1 + m, x1 - m, bottom.y0 - m) > 0.02) continue; // something is in it
+    // A box has sides; two unrelated lines one above the other don't.
+    const midTop = best.y1 + (bottom.y0 - best.y1) / 4;
+    const midBottom = bottom.y0 - (bottom.y0 - best.y1) / 4;
+    if (upright(x0 - 12 * k, x0 + 2 * k, midTop, midBottom) < 0.25 || upright(x1 - 2 * k, x1 + 12 * k, midTop, midBottom) < 0.25) continue;
+    used.add(best).add(bottom);
+    places.push({ name: 'empty box', x: (x0 + x1) / 2, y: (best.y1 + bottom.y0) / 2, w: x1 - x0, h: bottom.y0 - best.y1 });
+  }
+  // Blank gaps: a line on its own (no sides going up or down from its ends), with nothing on it.
+  for (const line of thin) {
+    if (used.has(line)) continue;
+    // The top or bottom of a box with something in it has its partner line across from it.
+    const partner = thin.some((other) => {
+      if (other === line) return false;
+      const apart = Math.abs(other.y0 - line.y0);
+      const overlap = Math.min(other.x1, line.x1) - Math.max(other.x0, line.x0);
+      return apart >= 12 * k && apart <= 170 * k && overlap >= 0.8 * (line.x1 - line.x0) && overlap >= 0.8 * (other.x1 - other.x0);
+    });
+    if (partner) continue;
+    // The top or bottom of a box (a button, a card, a text box) has sides going down or up from its
+    // ends, touching the line; words beside a gap stand clear of it.
+    // Follow the ink joined to one end of the line, in a small square round that end.
+    const reach = (xEnd) => {
+      const [left, right] = [Math.max(0, Math.round(xEnd - 12 * k)), Math.min(W - 1, Math.round(xEnd + 12 * k))];
+      const [top, bottom] = [Math.max(0, Math.round(line.y0 - 16 * k)), Math.min(H - 1, Math.round(line.y1 + 16 * k))];
+      const seen = new Set();
+      const queue = [];
+      for (let y = line.y0; y <= line.y1; y++) {
+        for (let x = Math.max(left, Math.round(xEnd - 2 * k)); x <= Math.min(right, Math.round(xEnd + 2 * k)); x++) {
+          if (ink(x, y)) {
+            seen.add(y * W + x);
+            queue.push([x, y]);
+          }
+        }
+      }
+      let [up, down] = [0, 0];
+      while (queue.length && seen.size < 4000) {
+        const [x, y] = queue.pop();
+        up = Math.max(up, line.y0 - y);
+        down = Math.max(down, y - line.y1);
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const [nx, ny] = [x + dx, y + dy];
+            if (nx < left || nx > right || ny < top || ny > bottom || seen.has(ny * W + nx) || !ink(nx, ny)) continue;
+            seen.add(ny * W + nx);
+            queue.push([nx, ny]);
+          }
+        }
+      }
+      return Math.max(up, down);
+    };
+    if (reach(line.x0) >= 5 * k || reach(line.x1) >= 5 * k) continue;
+    if (inkShare(line.x0 + m, line.y0 - 22 * k, line.x1 - m, line.y0 - m) > 0.02) continue;
+    places.push({ name: 'empty gap', x: (line.x0 + line.x1) / 2, y: line.y0 - 12 * k, w: line.x1 - line.x0, h: 20 * k, line });
+  }
+  // As things in real pixels, leaving out any that are already a listed thing (a text box, a named box),
+  // or the edge of one.
+  const [sx, sy] = [W / real.width, H / real.height];
+  const out = [];
+  for (const p of places) {
+    const thing = { type: 'place', name: p.name, value: '', state: '', x: Math.round(real.x + p.x / sx), y: Math.round(real.y + p.y / sy), w: Math.round(p.w / sx), h: Math.round(p.h / sy) };
+    const listed = elements.filter((e) => e.w && e.h && e.type !== 'text');
+    const inside = listed.some((e) => Math.abs(thing.x - e.x) < e.w / 2 && Math.abs(thing.y - e.y) < e.h / 2);
+    const edge =
+      p.line &&
+      listed.some((e) => {
+        const [lx0, lx1, ly] = [real.x + p.line.x0 / sx, real.x + p.line.x1 / sx, real.y + p.line.y0 / sy];
+        const overlap = Math.min(lx1, e.x + e.w / 2) - Math.max(lx0, e.x - e.w / 2);
+        return overlap > 0.5 * (lx1 - lx0) && ly >= e.y - e.h / 2 - 6 && ly <= e.y + e.h / 2 + 6;
+      });
+    const twice = out.some((o) => Math.hypot(o.x - thing.x, o.y - thing.y) < 14 * k);
+    const holds = p.name === 'empty box' && elements.some((e) => Math.abs(e.x - thing.x) < thing.w / 2 && Math.abs(e.y - thing.y) < thing.h / 2);
+    if (!inside && !edge && !twice && !holds) out.push(thing);
+  }
+  // Numbered in reading order (row by row, left to right): "empty box 1", "empty box 2"…
+  const row = 24 / sy;
+  out.sort((a, b) => Math.round(a.y / row) - Math.round(b.y / row) || a.x - b.x);
+  const numbered = {};
+  for (const p of out) {
+    numbered[p.name] = (numbered[p.name] || 0) + 1;
+    p.name = `${p.name} ${numbered[p.name]}`;
+  }
+  return out.slice(0, 16);
+}
+
+/**
+ * Solid patches of colour (squares, circles, tiles with no words), which Windows can't list, as things
+ * to click. Not on a page with text boxes, and not on a busy picture.
+ */
+function colourShapes(image, rect, elements) {
+  const { width: W, height: H } = image.getSize();
+  if (W * H > 3e6 || W < 40 || H < 40 || elements.some((e) => TYPING.has(e.type))) return [];
+  const px = image.toBitmap(); // BGRA
+  const real = screen.dipToScreenRect(null, rect);
+  const k = W / rect.width;
+  const cell = Math.max(2, Math.round(3 * k));
+  const [cols, rows] = [Math.floor(W / cell), Math.floor(H / cell)];
+  const NAMES = ['', 'red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
+  const hueOfPixel = (b, g, r) => {
+    const [max, min] = [Math.max(r, g, b), Math.min(r, g, b)];
+    if (max < 70 || max - min < 70) return 0;
+    const h = max === r ? ((g - b) / (max - min) + 6) % 6 : max === g ? (b - r) / (max - min) + 2 : (r - g) / (max - min) + 4;
+    const deg = h * 60;
+    return deg < 15 || deg >= 340 ? 1 : deg < 45 ? 2 : deg < 70 ? 3 : deg < 170 ? 4 : deg < 260 ? 5 : deg < 300 ? 6 : 7;
+  };
+  const grid = new Uint8Array(cols * rows);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = ((y * cell + (cell >> 1)) * W + x * cell + (cell >> 1)) * 4;
+      grid[y * cols + x] = hueOfPixel(px[i], px[i + 1], px[i + 2]);
+    }
+  }
+  const seen = new Uint8Array(cols * rows);
+  const found = [];
+  for (let start = 0; start < grid.length; start++) {
+    if (!grid[start] || seen[start]) continue;
+    const colour = grid[start];
+    const stack = [start];
+    seen[start] = 1;
+    let [n, x0, y0, x1, y1] = [0, cols, rows, 0, 0];
+    while (stack.length) {
+      const at = stack.pop();
+      const [x, y] = [at % cols, Math.floor(at / cols)];
+      n++;
+      [x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+      for (const next of [x > 0 ? at - 1 : -1, x < cols - 1 ? at + 1 : -1, y > 0 ? at - cols : -1, y < rows - 1 ? at + cols : -1]) {
+        if (next >= 0 && !seen[next] && grid[next] === colour) {
+          seen[next] = 1;
+          stack.push(next);
+        }
+      }
+    }
+    const [bw, bh] = [(x1 - x0 + 1) * cell, (y1 - y0 + 1) * cell];
+    if (n * cell * cell < 500 * k * k || Math.min(bw, bh) < 16 * k || n * cell * cell < 0.5 * bw * bh) continue;
+    found.push({ colour: NAMES[colour], x: x0 * cell + bw / 2, y: y0 * cell + bh / 2, w: bw, h: bh });
+  }
+  if (found.length > 12) return [];
+  const [sx, sy] = [W / real.width, H / real.height];
+  const listed = elements.filter((e) => e.w && e.h && e.type !== 'text');
+  const out = [];
+  const counts = {};
+  found.sort((a, b) => Math.round(a.y / (24 * k)) - Math.round(b.y / (24 * k)) || a.x - b.x);
+  for (const p of found) {
+    const thing = { type: 'shape', name: '', value: '', state: '', x: Math.round(real.x + p.x / sx), y: Math.round(real.y + p.y / sy), w: Math.round(p.w / sx), h: Math.round(p.h / sy) };
+    if (listed.some((e) => Math.abs(thing.x - e.x) < e.w / 2 && Math.abs(thing.y - e.y) < e.h / 2)) continue;
+    counts[p.colour] = (counts[p.colour] || 0) + 1;
+    thing.name = counts[p.colour] > 1 ? `${p.colour} shape ${counts[p.colour]}` : `${p.colour} shape`;
+    out.push(thing);
+  }
+  return out;
+}
+
+/** After a drag the page moves things about: find each thing again by its name and kind. */
+async function relocate(elements, rect, actions = []) {
+  const fresh = await frameElements(rect).catch(() => null);
+  if (!fresh || !fresh.length) return;
+  const before = elements.map((e) => ({ x: e.x, y: e.y }));
+  for (const e of elements) {
+    let best = null;
+    for (const f of fresh) {
+      if (f.type !== e.type || f.name !== e.name) continue;
+      const d = Math.hypot(f.x - e.x, f.y - e.y);
+      if (!best || d < best.d) best = { f, d };
+    }
+    if (best) Object.assign(e, { x: best.f.x, y: best.f.y, w: best.f.w, h: best.f.h });
+  }
+  // Empty boxes and gaps aren't in Windows' list: they move with the words beside them.
+  const carried = new Set(actions.filter((a) => a.type === 'drag').map((a) => a.from));
+  elements.forEach((e, i) => {
+    if (e.type !== 'place') return;
+    let anchor = null;
+    elements.forEach((o, j) => {
+      if (o.type === 'place' || o.type === 'shape' || carried.has(j)) return;
+      const d = Math.hypot(before[j].x - before[i].x, before[j].y - before[i].y);
+      if (!anchor || d < anchor.d) anchor = { j, d };
+    });
+    if (!anchor) return;
+    e.x += elements[anchor.j].x - before[anchor.j].x;
+    e.y += elements[anchor.j].y - before[anchor.j].y;
+  });
+}
+
+/** What an action did, in words the model can read back. */
+function actionWords(action, rect, elements) {
+  const thing = (i) => `#${i + 1} "${text(elements[i].name, 40)}"`;
+  const at = (p) => `${p.x},${p.y}`;
+  switch (action.type) {
+    case 'click':
+      return action.target != null ? `clicked ${thing(action.target)}` : `clicked at ${at(action.at)}`;
+    case 'type':
+      return `typed "${action.text}"${action.target != null ? ` into ${thing(action.target)}` : ''}`;
+    case 'choose':
+      return `chose "${action.text}" in ${thing(action.target)}`;
+    case 'drag':
+      return `dragged ${action.from != null ? thing(action.from) : at(action.fromAt)} to ${action.to != null ? thing(action.to) : at(action.toAt)}`;
+    case 'slider':
+      return `set ${thing(action.target)} to ${action.value}`;
+    case 'sort':
+      return `moved the cards into the order ${action.order.map((i) => `"${text(elements[i].name, 30)}"`).join(', ')}`;
+    default:
+      return `pressed ${action.key}`;
+  }
+}
+
+/** A short reply from the model. One that rambles on is cut off, and what it said up to there is used. */
+async function shortReply({ messages, signal, temperature, most = 1500 }) {
   const providerId = settings.provider;
-  const done = [];
-  for (let roundNo = 0; roundNo < FILL_ROUNDS && !controller.signal.aborted; roundNo++) {
-    const rect = { ...settings.frame };
-    const [image, elements] = await Promise.all([captureFrame(), frameElements(rect).catch(() => [])]);
-    const note = done.length
-      ? `Already done: ${done.join('; ')}. This is the screen now. Reply done if the answer is in.`
-      : 'This is the screen now.';
-    const reply = await chat(providerId, {
+  const turn = new AbortController();
+  const stop = () => turn.abort();
+  if (signal) {
+    if (signal.aborted) turn.abort();
+    signal.addEventListener('abort', stop, { once: true });
+  }
+  let said = '';
+  let cut = false;
+  try {
+    return await chat(providerId, {
       model: modelFor(providerId),
       apiKey: getKey(providerId),
       baseUrl: baseUrlFor(providerId),
-      messages: [
-        { role: 'system', content: fillPrompt(answer, elements) },
-        { role: 'user', content: note, images: [image.toJPEG(88).toString('base64')] },
-      ],
-      signal: controller.signal,
+      messages,
+      temperature,
+      signal: turn.signal,
+      onChunk: (piece) => {
+        said += piece;
+        if (said.length > most && !cut) {
+          cut = true;
+          turn.abort();
+        }
+      },
     });
-    if (process.env.SAGE_DEBUG) console.log(`fill round ${roundNo + 1}: ${elements.length} controls\n${reply}`);
-    const plan = readCommands(reply, elements.length);
+  } catch (error) {
+    if (!cut || (signal && signal.aborted)) throw error;
+    // The last line may be half written, and a model stuck in a loop repeats the rest.
+    const lines = said.split('\n');
+    if (lines.length > 1) lines.pop();
+    return [...new Set(lines)].join('\n');
+  } finally {
+    if (signal) signal.removeEventListener('abort', stop);
+  }
+}
+
+const PICKABLE = new Set(['radiobutton', 'checkbox', 'listitem', 'button', 'splitbutton', 'menuitem', 'tabitem', 'treeitem', 'dataitem', 'custom', 'image', 'text']);
+const UNTYPED = new Set(['button', 'splitbutton', 'radiobutton', 'checkbox', 'hyperlink', 'tabitem', 'menuitem']);
+const isOn = (e) => /^(?:checked|selected)$/.test(e.state || '');
+const readingOrder = (list) => [...list].sort((a, b) => (Math.abs(a.e.y - b.e.y) < 14 ? a.e.x - b.e.x : a.e.y - b.e.y));
+
+/**
+ * What the answer already spells out, as moves: boxes to fill, options to pick, pairs to match, words
+ * to build a sentence from, cards to put in order, a slider's value, a coloured shape. Only when each
+ * part is exactly one thing on screen; anything less (null) is left to the model.
+ */
+function clearPlan(answer, elements) {
+  const plain = toPlain(answer).trim();
+  const lines = plain.split('\n').map((l) => l.trim().replace(/^[-•*]\s+/, '')).filter(Boolean);
+  if (!lines.length) return null;
+  const indexed = elements.map((e, i) => ({ e, i }));
+  const allFields = readingOrder(indexed.filter(({ e }) => TYPING.has(e.type)));
+  const asked = allFields.filter(({ e }) => !/\b(?:search|find|filter|url|address)\b/i.test(e.name));
+  const fields = asked.length ? asked : allFields;
+  const words = elements.filter((e) => e.type === 'text').map((e) => e.name).join(' ');
+  const moving = /\b(?:drag|drop|order|arrange|sort|rank|sequence)\b/i.test(words);
+  const one = (hits) => {
+    const best = hits.length > 1 ? hits.filter(({ e }) => e.type !== 'text') : hits;
+    return best.length === 1 ? best[0].i : null;
+  };
+  const named = (part, allowed = () => true) => {
+    const want = simple(part);
+    return want ? one(indexed.filter(({ e }) => allowed(e) && simple(e.name) === want)) : null;
+  };
+  const tick = (e) => e.type === 'radiobutton' || e.type === 'checkbox';
+  const card = (e) => e.type !== 'place' && e.type !== 'shape' && e.name.length <= 60;
+  const distinct = (list) => list.length > 0 && list.every((i) => i !== null) && new Set(list).size === list.length;
+  const splitUp = (l) => l.split(/\s*(?:[,;]|\band\b)\s*/i).filter(Boolean);
+  const pairOf = (l) => {
+    const arrow = l.split(/\s*(?:→|->|=>|⇒)\s*/);
+    if (arrow.length === 2) return arrow;
+    const colon = l.split(/\s*:\s*/);
+    return colon.length === 2 ? colon : null;
+  };
+  const pairs = lines.map(pairOf);
+  const pickMoves = (picks) => {
+    const moves = picks.filter((i) => !isOn(elements[i])).map((i) => ({ type: 'click', target: i, on: true }));
+    // Ticks left over from an earlier answer come off.
+    for (const { e, i } of indexed) if (e.state === 'checked' && !picks.includes(i)) moves.push({ type: 'click', target: i, on: false });
+    return moves;
+  };
+
+  // Plain words count as an option only when they sit in a row or column with others like them.
+  // The question on its own, however closely the answer repeats it, is not something to click.
+  const shortTexts = elements.filter((e) => e.type === 'text' && e.name.length <= 40);
+  const inSet = (e) =>
+    shortTexts.some(
+      (o) => o !== e && Math.abs((o.h || 0) - (e.h || 0)) <= 8 && (Math.abs(o.y - e.y) < 14 || Math.abs(o.x - (o.w || 0) / 2 - (e.x - (e.w || 0) / 2)) < 14),
+    );
+  const hasTicks = elements.some(tick);
+  const zones = elements.filter((e) => e.type === 'group' && e.name && e.name.length <= 40);
+  const inZone = (e) => zones.some((z) => z !== e && Math.abs(e.x - z.x) <= (z.w || 0) / 2 && Math.abs(e.y - z.y) <= (z.h || 0) / 2);
+  const looseCard = (e) => zones.length >= 2 && !inZone(e);
+  const pickable = (e) => {
+    if (!PICKABLE.has(e.type)) return false;
+    if (moving || hasTicks) return tick(e);
+    if (e.type === 'text') return !allFields.length && !looseCard(e) && e.name.length <= 40 && inSet(e);
+    return true;
+  };
+  const optionFor = (part) => {
+    const direct = named(part, pickable);
+    if (direct !== null) return direct;
+    const letter = part.match(/^\(?([a-h])\)?[.):]?$/i);
+    if (letter) return one(indexed.filter(({ e }) => pickable(e) && new RegExp('^\\s*\\(?' + letter[1] + '\\s*[.):]', 'i').test(e.name)));
+    const body = (t) => simple(t.replace(/^\s*\(?[a-h][.):]\s+/i, ''));
+    const want = body(part);
+    return want ? one(indexed.filter(({ e }) => pickable(e) && body(e.name) === want)) : null;
+  };
+
+  // Options: each line of the answer is one thing to pick.
+  const parts = lines.length === 1 && /[,;]|\band\b/i.test(lines[0]) && optionFor(lines[0]) === null ? splitUp(lines[0]) : lines;
+  const picks = parts.map(optionFor);
+  if (distinct(picks) && (!allFields.length || picks.every((i) => tick(elements[i])))) return pickMoves(picks);
+
+  // The same options under each question ("True / False" three times): one answer per group, in order.
+  const ticks = readingOrder(indexed.filter(({ e }) => tick(e)));
+  const tokens = lines.length > 1 ? lines : lines[0].split(/[\s,;]+/).filter(Boolean);
+  const size = ticks.length / tokens.length;
+  if (tokens.length >= 2 && size >= 2 && Number.isInteger(size)) {
+    const wordOf = (t) => simple(t.replace(/^\(?\d+[.)]\s*/, '').split(/[:→]/).pop());
+    const chosen = tokens.map((t, n) => {
+      const want = wordOf(t);
+      const hits = ticks.slice(n * size, (n + 1) * size).filter(({ e }) => want && (simple(e.name) === want || simple(e.name).endsWith(want)));
+      return hits.length === 1 ? hits[0].i : null;
+    });
+    if (distinct(chosen)) return pickMoves(chosen);
+  }
+
+  // Boxes and dropdowns: by their labels, or in order.
+  if (fields.length) {
+    const fill = ({ e, i }, value) => {
+      if (e.type === 'combobox') return { type: 'choose', target: i, text: value };
+      if (e.type === 'spinner') {
+        const number = String(value).match(/-?\d+(?:[.,]\d+)?/);
+        return { type: 'type', target: i, text: number ? number[0] : value };
+      }
+      return { type: 'type', target: i, text: value };
+    };
+    if (pairs.every(Boolean)) {
+      const byLabel = pairs.map(([label]) => {
+        const want = simple(label);
+        const own = fields.find(({ e }) => simple(e.name) === want);
+        if (own) return own;
+        const tag = named(label, (e) => e.type === 'text');
+        if (tag === null) return null;
+        const beside = fields.filter(({ e }) => Math.abs(e.y - elements[tag].y) < 16 && e.x > elements[tag].x);
+        return beside.length ? beside.reduce((n, f) => (f.e.x < n.e.x ? f : n)) : null;
+      });
+      if (byLabel.every(Boolean) && new Set(byLabel).size === byLabel.length) return byLabel.map((field, n) => fill(field, pairs[n][1]));
+    }
+    const values = lines.length === fields.length ? lines : lines.length === 1 && splitUp(lines[0]).length === fields.length ? splitUp(lines[0]) : null;
+    if (values) return fields.map((field, n) => fill(field, values[n].replace(/^\(?\d+[.)]\s+/, '')));
+    // One letter to a box.
+    const letters = [...plain].filter((c) => /[\p{L}\p{N}]/u.test(c));
+    if (fields.length > 1 && letters.length === fields.length && fields.every(({ e }) => e.type === 'edit' && (e.w || 99) <= 60)) {
+      return fields.map((field, n) => fill(field, letters[n]));
+    }
+    return null;
+  }
+
+  // Pairs: a tick where a row meets a column, two buttons to click in turn, or a card to drag.
+  if (pairs.every(Boolean)) {
+    const moves = [];
+    const dragged = [];
+    let failed = false;
+    for (const [left, right] of pairs) {
+      const [wantA, wantB] = [simple(left), simple(right)];
+      let box = one(indexed.filter(({ e }) => tick(e) && simple(e.name).includes(wantA) && simple(e.name).includes(wantB)));
+      let [from, to] = [named(left, (e) => !tick(e) && card(e)), named(right, (e) => !tick(e))];
+      // "Mammals: Dog" names the box first; the card is what moves.
+      const zone = (i) => elements[i].type === 'group' || elements[i].type === 'place';
+      if (from !== null && to !== null && zone(from) && !zone(to)) [from, to] = [to, from];
+      if (box === null && from !== null && to !== null) {
+        box = one(indexed.filter(({ e }) => tick(e) && Math.abs(e.y - elements[from].y) < 16 && Math.abs(e.x - elements[to].x) < 30));
+      }
+      if (box !== null) {
+        if (!isOn(elements[box])) moves.push({ type: 'click', target: box, on: true });
+      } else if (from === null || to === null || from === to) {
+        failed = true;
+        break;
+      } else if (['button', 'splitbutton', 'listitem'].includes(elements[from].type) && ['button', 'splitbutton', 'listitem'].includes(elements[to].type)) {
+        moves.push({ type: 'click', target: from }, { type: 'click', target: to });
+      } else {
+        dragged.push(from);
+        moves.push({ type: 'drag', from, to });
+      }
+    }
+    if (!failed && (!dragged.length || distinct(dragged))) return moves;
+  }
+
+  // An order: into one empty box each, or by moving the cards along their list.
+  const places = indexed.filter(({ e }) => e.type === 'place');
+  const numbered = lines.map((l) => l.match(/^\(?(\d+)[.)]\s*(.+)$/));
+  const chain = lines.length === 1 ? lines[0].split(/\s*(?:→|->|=>|⇒|,)\s*/).filter(Boolean) : [];
+  const items = numbered.every((m, n) => m && Number(m[1]) === n + 1)
+    ? numbered.map((m) => m[2])
+    : chain.length > 1 && (moving || /→|->|=>|⇒/.test(lines[0]))
+      ? chain
+      : moving && lines.length > 1
+        ? lines
+        : moving && lines.length === 1 && lines[0].split(/\s+/).length > 1
+          ? lines[0].split(/\s+/)
+          : null;
+  if (items && items.length > 1) {
+    const cards = items.map((t) => named(t, card));
+    if (distinct(cards)) {
+      if (places.length === cards.length) return cards.map((from, n) => ({ type: 'drag', from, to: places[n].i }));
+      const spread = (k) => Math.max(...cards.map((i) => elements[i][k])) - Math.min(...cards.map((i) => elements[i][k]));
+      const intoBoxes = /\b(?:into|onto)\b.*\b(?:box|boxes|slot|slots|gap|gaps|space|spaces|blank|blanks)\b/i.test(words);
+      if (!places.length && !intoBoxes && (spread('x') <= 14 || spread('y') <= 14)) return [{ type: 'sort', order: cards }];
+    }
+  }
+
+  // A sentence with gaps: the cards it uses, in the order it uses them, one to each gap.
+  const mention = (name) => {
+    const safe = name.trim().replace(/[.*+?^$()|[\]{}\\/]/g, '\\$&');
+    const m = safe ? new RegExp('(?<![\\p{L}\\p{N}])' + safe + '(?![\\p{L}\\p{N}])', 'iu').exec(plain.replace(/\n/g, ' ')) : null;
+    return m ? m.index : -1;
+  };
+  if (places.length) {
+    const loose = indexed.filter(({ e }) => e.type !== 'place' && e.type !== 'shape' && e.name.length <= 40 && !places.some((p) => Math.abs(p.e.y - e.y) < 18));
+    const used = loose.map((c) => ({ ...c, at: mention(c.e.name) })).filter((c) => c.at >= 0).sort((p, q) => p.at - q.at);
+    if (used.length === places.length) return used.map((c, n) => ({ type: 'drag', from: c.i, to: places[n].i }));
+  }
+
+  // Word tiles: click them in the order of the sentence.
+  if (lines.length === 1) {
+    const sentence = lines[0].replace(/[.!?,;:]+/g, ' ').trim().split(/\s+/);
+    if (sentence.length >= 2) {
+      const free = indexed.filter(({ e }) => ['button', 'splitbutton', 'listitem', 'custom'].includes(e.type) && e.name.length <= 24);
+      const tiles = [];
+      for (const word of sentence) {
+        const tile = free.find(({ e, i }) => simple(e.name) === simple(word) && !tiles.includes(i));
+        if (tile) tiles.push(tile.i);
+      }
+      if (tiles.length === sentence.length) return tiles.map((target) => ({ type: 'click', target, moved: true }));
+    }
+  }
+
+  // One slider and one number.
+  const sliders = indexed.filter(({ e }) => e.type === 'slider' && e.max != null);
+  if (sliders.length === 1) {
+    const numbers = lines.join(' ').match(/-?\d+(?:\.\d+)?/g) || [];
+    const value = Number(numbers[0]);
+    if (numbers.length === 1 && value >= sliders[0].e.min && value <= sliders[0].e.max) return [{ type: 'slider', target: sliders[0].i, value }];
+  }
+
+  // One switch, and "on" or "off".
+  const switches = indexed.filter(({ e }) => /^(?:not )?checked$/.test(e.state || ''));
+  if (switches.length === 1) {
+    const wantOn = /\b(?:off|no|false)\b/i.test(plain) ? false : /\b(?:on|yes|true)\b/i.test(plain) ? true : null;
+    if (wantOn !== null) return isOn(switches[0].e) === wantOn ? [] : [{ type: 'click', target: switches[0].i, on: wantOn }];
+  }
+
+  // "The green square": the one shape of that colour.
+  const colours = [...new Set(lines.join(' ').toLowerCase().match(/\b(?:red|orange|yellow|green|blue|purple|pink)\b/g) || [])];
+  if (colours.length === 1) {
+    const shape = one(indexed.filter(({ e }) => e.type === 'shape' && e.name.startsWith(colours[0])));
+    if (shape !== null) return [{ type: 'click', target: shape }];
+  }
+
+  // A longer answer that names some of the options ("The answer is Paris").
+  if (!moving) {
+    const options = indexed.filter(({ e }) => pickable(e) && simple(e.name).length >= 2);
+    const named2 = options.filter(({ e }) => mention(e.name.replace(/^\s*\(?[a-h][.):]\s+/i, '')) >= 0).map(({ i }) => i);
+    if (options.length >= 2 && named2.length && named2.length < options.length) return pickMoves(named2);
+  }
+  return null;
+}
+
+/** How many separate answers the page takes, when that can be told from its controls. */
+function partsNeeded(elements) {
+  const fields = elements.filter((e) => TYPING.has(e.type) && !/\b(?:search|find|filter|url|address)\b/i.test(e.name));
+  if (fields.length > 1) return { count: fields.length, letters: fields.every((e) => e.type === 'edit' && (e.w || 99) <= 60) };
+  const rows = [];
+  for (const r of elements.filter((e) => e.type === 'radiobutton')) {
+    const row = rows.find((o) => Math.abs(o.y - r.y) < 14);
+    if (row) row.n++;
+    else rows.push({ y: r.y, n: 1 });
+  }
+  return rows.length >= 2 && rows.every((r) => r.n >= 2) ? { count: rows.length, letters: false } : null;
+}
+
+/** An answer that covers fewer boxes or questions than the page has: ask for all of them. */
+async function completeAnswer(answer, elements, image, signal) {
+  const need = partsNeeded(elements);
+  if (!need) return answer;
+  const plain = toPlain(answer).trim();
+  const count = (t) => {
+    if (need.letters) return [...t].filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
+    const lines = t.split('\n').map((l) => l.trim()).filter(Boolean);
+    return lines.length > 1 ? lines.length : t.split(/\s*(?:[,;]|\band\b|\s)\s*/i).filter(Boolean).length;
+  };
+  if (count(plain) >= need.count) return answer;
+  const reply = await shortReply({
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are looking at a capture of a question with several parts.',
+          need.letters ? `It has ${need.count} boxes that take one letter or digit each, for one word or number.` : `It has ${need.count} separate boxes or questions.`,
+          `The answer so far only covers part of it: ${plain}`,
+          need.letters
+            ? `Reply with the whole word or number, exactly ${need.count} characters long, and nothing else.`
+            : `Reply with exactly ${need.count} answers, one per line, in order from the top of the page. Each is only the value or option. Nothing else.`,
+        ].join('\n'),
+      },
+      { role: 'user', content: 'Give the full answer.', images: [image.toJPEG(88).toString('base64')] },
+    ],
+    temperature: 0,
+    signal,
+    most: 400,
+  }).catch((error) => {
+    if (signal.aborted) throw error;
+    return '';
+  });
+  const fuller = toPlain(answerOf(reply) || reply).trim();
+  return fuller && count(fuller) === need.count ? fuller : answer;
+}
+
+/**
+ * An answer that names none of the options, as when they are pictures whose names only Windows can
+ * read: choose from those names. Null when it doesn't apply or none of them fits.
+ */
+async function answerAmongOptions(answer, elements, image, signal) {
+  const kinds = new Set(['button', 'splitbutton', 'radiobutton', 'checkbox', 'listitem', 'menuitem', 'custom', 'image']);
+  const options = elements.filter((e) => kinds.has(e.type) && e.name && e.name.length <= 40);
+  if (options.length < 2 || options.length > 12 || elements.some((e) => TYPING.has(e.type) || e.type === 'place')) return null;
+  const plain = toPlain(answer).trim();
+  if (options.some((e) => saysName(plain, e.name))) return null;
+  const names = [...new Set(options.map((e) => e.name.trim()))];
+  const reply = await shortReply({
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Read the question in the capture and answer it by choosing from these options.',
+          'They may show as pictures or blank squares, so go by their names:',
+          ...names.map((n) => `- ${n}`),
+          'Reply with only the name of the right option, copied exactly. If several are right, one per line. If none of them fits, reply: none',
+        ].join('\n'),
+      },
+      { role: 'user', content: 'Which option is the answer?', images: [image.toJPEG(88).toString('base64')] },
+    ],
+    temperature: 0,
+    signal,
+    most: 200,
+  }).catch((error) => {
+    if (signal.aborted) throw error;
+    return '';
+  });
+  const lines = toPlain(answerOf(reply) || reply).split('\n').map((l) => l.trim().replace(/^[-•*]\s+/, '')).filter(Boolean);
+  const picked = lines.map((l) => names.find((n) => simple(n) === simple(l)));
+  return picked.length && picked.every(Boolean) ? [...new Set(picked)].join('\n') : null;
+}
+
+/** The words on a page that lists no controls (a canvas, a game), read off the screen. */
+async function wordsOnPage(rect, listed) {
+  const seen = await readScreen(rect).catch(() => ({ phrases: [] }));
+  const known = new Set(listed.map((e) => simple(e.name)));
+  return seen.phrases
+    .filter((p) => simple(p.text) && !known.has(simple(p.text)) && !SUBMIT_WORDS.test(p.text))
+    .map((p) => ({ type: 'text', name: p.text, value: '', state: '', x: Math.round((p.box.left + p.box.right) / 2), y: Math.round((p.box.top + p.box.bottom) / 2), w: Math.round(p.box.right - p.box.left), h: Math.round(p.box.bottom - p.box.top) }))
+    .slice(0, 30);
+}
+
+/** Did the moves take? Anything the page doesn't report counts as done. */
+async function planLanded(actions, elements, rect) {
+  const now = await frameElements(rect).catch(() => []);
+  const fresh = (e) => {
+    let best = null;
+    for (const f of now) {
+      if (f.type !== e.type || f.name !== e.name) continue;
+      const d = Math.hypot(f.x - e.x, f.y - e.y);
+      if (!best || d < best.d) best = { f, d };
+    }
+    return best && best.f;
+  };
+  return actions.every((a) => {
+    if (a.type === 'click') {
+      if (a.on === undefined || !elements[a.target].state) return true;
+      const f = fresh(elements[a.target]);
+      return !f || isOn(f) === a.on;
+    }
+    if (a.type === 'drag') {
+      const [card, target] = [elements[a.from], elements[a.to]];
+      // A place or box has edges to be inside; a label only marks where its box is.
+      const [rx, ry] = target.type === 'text' ? [70, 70] : [(target.w || 0) / 2 + 6, (target.h || 0) / 2 + 6];
+      return now.some((e) => e.type === card.type && e.name === card.name && Math.abs(e.x - target.x) <= rx && Math.abs(e.y - target.y) <= ry);
+    }
+    if (a.type === 'slider') {
+      const f = fresh(elements[a.target]);
+      return !!f && Number(f.value) === a.value;
+    }
+    if (a.type === 'type' || a.type === 'choose') {
+      const f = fresh(elements[a.target]);
+      if (!f) return true;
+      const held = simple(f.value);
+      return /^[•*●]+$/.test(String(f.value).trim()) || (!!held && held.includes(simple(a.text)));
+    }
+    if (a.type === 'sort') {
+      const cards = a.order.map((i) => fresh(elements[i]));
+      if (cards.some((c) => !c)) return false;
+      const along = Math.max(...cards.map((c) => c.y)) - Math.min(...cards.map((c) => c.y)) >= Math.max(...cards.map((c) => c.x)) - Math.min(...cards.map((c) => c.x)) ? 'y' : 'x';
+      return cards.every((c, k) => k === 0 || c[along] > cards[k - 1][along]);
+    }
+    return true;
+  });
+}
+
+/**
+ * Fill in: the model looks at the frame (and the controls in it), works out what kind of question
+ * it is, and enters the answer. Then it looks again to check, and fixes what is missing, a few times at most.
+ */
+async function fillCore(given, controller) {
+  let answer = given;
+  const providerId = settings.provider;
+  const done = []; // what happened, in words, for the next look
+  const acted = []; // the kinds of thing actually done
+  let lastPlan = '';
+  for (let roundNo = 0; roundNo < FILL_ROUNDS && !controller.signal.aborted; roundNo++) {
+    const rect = { ...settings.frame };
+    const [image, found] = await Promise.all([captureFrame(), frameElements(rect).catch(() => [])]);
+    // Buttons that hand the answer in are never Fill in's to press, so they aren't offered.
+    const listed = found.filter((e) => !((e.type === 'button' || e.type === 'hyperlink') && SUBMIT_WORDS.test(e.name)));
+    // Empty boxes and gaps to drop things into, which Windows can't list, are found in the picture.
+    // A page that lists next to nothing (a canvas, a game): read its words off the screen.
+    const fewThings = listed.filter((e) => e.type !== 'text' || e.name.length <= 40).length < 2;
+    const read = fewThings ? await wordsOnPage(rect, listed) : [];
+    const known = [...listed, ...read];
+    const elements = [...known, ...emptyPlaces(image, rect, known), ...colourShapes(image, rect, known)];
+    const note = done.length
+      ? `Already done: ${done.join('; ')}.\nThis is the screen now. Check it: if the answer is fully in, reply done. Otherwise give only the commands for what is still missing or wrong.`
+      : 'This is the screen now.';
+    const hint = lastFill && lastFill.frame === frameKey(rect) && Date.now() - lastFill.time < 30 * 60000 ? lastFill.how : '';
+    if (roundNo === 0) answer = await completeAnswer(answer, elements, image, controller.signal);
+    // Moves the answer already spells out don't need the model to work them out again.
+    let clear = roundNo === 0 ? clearPlan(answer, elements) : null;
+    if (roundNo === 0 && clear === null) {
+      const picked = await answerAmongOptions(answer, elements, image, controller.signal);
+      if (picked) {
+        answer = picked;
+        clear = clearPlan(answer, elements);
+      }
+    }
+    if (clear && !clear.length) return 1; // it's already in
+    const reply = clear
+      ? clear.map((a) => JSON.stringify(a)).join('\n')
+      : await shortReply({
+          messages: [
+            { role: 'system', content: fillPrompt(answer, elements, rect, hint) },
+            { role: 'user', content: note, images: [markImage(image, rect, elements).toJPEG(90).toString('base64')] },
+          ],
+          signal: controller.signal,
+        });
+    if (process.env.SAGE_DEBUG) {
+      const places = elements.filter((e) => e.type === 'place').map((e) => `${e.name} at ${onGrid(rect, e)}`);
+      console.log(`fill round ${roundNo + 1}: ${elements.length} controls${places.length ? ` (${places.join(', ')})` : ''}\n${elements.map((e, i) => describeElement(e, i, rect)).join('\n')}\n${reply}`);
+    }
+    const plan = clear ? { actions: clear, look: false, skipped: [] } : readCommands(reply, elements);
+    // A box that already holds this text doesn't need typing into again.
+    const same = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+    plan.actions = plan.actions.filter((a) => !((a.type === 'type' || a.type === 'choose') && a.target != null && elements[a.target].value && same(elements[a.target].value, a.text)));
+    const notTyped = (a) => a.type === 'type' && a.target != null && UNTYPED.has(elements[a.target].type);
+    for (const a of plan.actions.filter(notTyped)) {
+      done.push(`could not type into #${a.target + 1} "${elements[a.target].name}": it is not a text box, so click it if it is the answer`);
+    }
+    if (plan.actions.some(notTyped)) {
+      plan.actions = plan.actions.filter((a) => !notTyped(a));
+      if (!plan.actions.length) continue;
+    }
+    // Commands that named nothing are told back, so the next look can put them right.
+    for (const line of plan.skipped) {
+      done.push(`could not follow "${line}": there is no thing with that number or name (for a place with no number, give X Y from the grid)`);
+    }
+    if (!plan.actions.length && !plan.skipped.length) break; // done
+    if (!plan.actions.length) continue;
+    // The same moves again would only undo them (a ticked box clicked twice).
+    const key = JSON.stringify(plan.actions);
+    if (key === lastPlan) break;
+    lastPlan = key;
     await aside(rect, async () => {
-      for (const action of plan.actions) {
+      for (const [n, action] of plan.actions.entries()) {
+        // Typing into a dropdown means picking that entry.
+        if (action.type === 'type' && action.target != null && elements[action.target].type === 'combobox') action.type = 'choose';
+        // The question's own words aren't a card to move.
+        if (action.type === 'drag' && action.from != null && elements[action.from].type === 'text' && elements[action.from].name.length > 40) {
+          done.push(`could not drag #${action.from + 1}: it is the question's text, not a card`);
+          continue;
+        }
+        // Typing needs a text box; say so next round rather than typing into thin air.
+        if (action.type === 'type' && action.target != null && !TYPING.has(elements[action.target].type)) {
+          done.push(`could not type into #${action.target + 1}: it is not a text box`);
+          continue;
+        }
         await perform(action, rect, elements, controller.signal);
-        const target = action.target != null ? ` ${action.target + 1}` : '';
-        done.push(`${action.type}${target}${action.text ? ` "${action.text}"` : ''}`);
+        done.push(actionWords(action, rect, elements));
+        acted.push(action.type);
+        // Cards slide along once one is dragged away: look where the rest are now.
+        if ((action.type === 'drag' || action.moved) && n < plan.actions.length - 1) await relocate(elements, rect, plan.actions);
       }
     });
-    if (!plan.look || !plan.actions.length) break;
-    await pause(400, controller.signal); // let the page react before looking again
+    await pause(plan.look ? 500 : 700, controller.signal); // let the page react before looking again
+    if (clear) {
+      await relocate(elements, rect, clear);
+      if (await planLanded(clear, elements, rect)) break; // if not, the model takes it from here
+    }
   }
-  return done.length;
+  if (acted.length) {
+    const how = [...new Set(acted)].map((k) => `${k} ×${acted.filter((x) => x === k).length}`).join(', ');
+    lastFill = { frame: frameKey(settings.frame), time: Date.now(), how };
+  }
+  return acted.length;
 }
+
+const frameKey = (r) => `${Math.round(r.x / 40)},${Math.round(r.y / 40)},${Math.round(r.width / 40)},${Math.round(r.height / 40)}`;
 
 // ---------- running mouse and keyboard work ----------
 // Fill in and the steps share this: one at a time, Esc or Stop ends it, and
@@ -1514,6 +2698,7 @@ async function automate(kind, job) {
   tell('auto:state', { on: true, kind });
   holdEscape(controller);
   for (const win of overlays) win.setIgnoreMouseEvents(true);
+  await quietFrame();
   let error = null;
   let result = null;
   try {
@@ -1528,12 +2713,15 @@ async function automate(kind, job) {
     filling = null;
     tell('auto:state', { on: false, kind, error, result, stopped: controller.signal.aborted });
     raiseFloating();
+    frameReturns();
   }
 }
 
+/** The Fill in button: runs your blocks when you have some, or just fills in the answer. */
 function fillIn() {
   const answer = latestAnswer();
   if (!answer || !settings.frameVisible) return;
+  if (settings.steps.list.length) return runSteps();
   automate('fill', (controller) => fillCore(answer, controller));
 }
 
@@ -1629,15 +2817,16 @@ function areaAround(point) {
 
 /** A picture of an area without our windows or the frame's shade in it. */
 async function cleanCapture(areaDip, options = {}) {
-  const overlayWins = [...overlays].filter((win) => !win.isDestroyed());
-  for (const win of overlayWins) win.setOpacity(0);
+  // During a run the frame is already faded out; otherwise it fades out for the picture and back.
+  const overlayWins = frameQuiet ? [] : [...overlays].filter((win) => !win.isDestroyed() && win.isVisible());
+  await Promise.all(overlayWins.map((win) => fadeTo(win, 0, 180)));
   try {
-    return await aside(null, async () => {
-      await wait(120);
+    return await aside(areaDip, async () => {
+      await wait(80);
       return captureRect(areaDip, { full: true, ...options });
     });
   } finally {
-    for (const win of overlayWins) if (!win.isDestroyed()) win.setOpacity(OVERLAY_OPACITY);
+    if (!frameQuiet) for (const win of overlayWins) fadeTo(win, OVERLAY_OPACITY, 260);
   }
 }
 
@@ -1749,20 +2938,16 @@ function ringAt(image, cx, cy) {
   return nativeImage.createFromBitmap(pixels, { width, height });
 }
 
-const lookAt = (system, question, image, signal) => {
-  const providerId = settings.provider;
-  return chat(providerId, {
-    model: modelFor(providerId),
-    apiKey: getKey(providerId),
-    baseUrl: baseUrlFor(providerId),
+const lookAt = (system, question, image, signal) =>
+  shortReply({
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: question, images: [image.toJPEG(88).toString('base64')] },
     ],
     temperature: 0,
     signal,
+    most: 600,
   });
-};
 
 /** For things with no words (an arrow, an icon): the model says what it is, so it can look for it later. */
 async function describeSpot(at) {
@@ -2036,7 +3221,7 @@ async function press(p, { button = 'left', settle = false, signal }) {
   const watch = settle ? watchArea(dip) : null;
   // Whether the page changed after the click (null when it wasn't watched).
   return aside(watch || around(dip), async () => {
-    await input.move(p.x, p.y);
+    await glide(p);
     await wait(settle ? 250 : 100);
     // Taken after the pointer arrives, so a hover look doesn't count as the page changing.
     const before = watch ? await snapshot(watch).catch(() => null) : null;
@@ -2195,13 +3380,19 @@ function feedbackArea() {
 async function pageText(areaDip) {
   const real = screen.dipToScreenRect(null, areaDip);
   const controls = await input.elements(real, process.pid).catch(() => []);
+  // Words read off the screen only count inside the frame: the margin can show other apps, whose text changes by itself.
+  const frame = screen.dipToScreenRect(null, settings.frame);
+  const inFrame = ({ box: b }) => {
+    const [x, y] = [(b.left + b.right) / 2, (b.top + b.bottom) / 2];
+    return x >= frame.x - 6 && x <= frame.x + frame.width + 6 && y >= frame.y - 6 && y <= frame.y + frame.height + 6;
+  };
   let image = null;
-  const seen = await readScreen(areaDip, (read) => read.phrases.length > 0, (shot) => (image = shot)).catch(() => ({ phrases: [] }));
+  const seen = await readScreen(areaDip, (read) => read.phrases.some(inFrame), (shot) => (image = shot)).catch(() => ({ phrases: [] }));
   const lines = [];
   for (const c of controls) {
     if (c.name && c.name.length <= 300) lines.push({ text: c.name, type: c.type, x: c.x, y: c.y, from: 'ui' });
   }
-  for (const phrase of seen.phrases) {
+  for (const phrase of seen.phrases.filter(inFrame)) {
     const b = phrase.box;
     lines.push({ text: phrase.text, type: 'text', x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2, from: 'read' });
   }
@@ -2475,11 +3666,16 @@ function startPick() {
   return new Promise((resolve) => {
     picking = { resolve };
     clearTimeout(hideTimer);
+    clearTimeout(frameBack);
+    frameQuiet = false;
     showOverlays();
-    for (const win of overlays) win.setIgnoreMouseEvents(false);
+    for (const win of overlays) {
+      win.setIgnoreMouseEvents(false);
+      fadeTo(win, OVERLAY_OPACITY, 200);
+    }
     // The widget fades and lets clicks through, so the spot can be under it too.
     if (widget && !widget.isDestroyed()) {
-      widget.setOpacity(0.25);
+      fadeTo(widget, 0.25, 220);
       widget.setIgnoreMouseEvents(true);
     }
     try {
@@ -2499,7 +3695,7 @@ function endPick(point) {
   for (const win of overlays) win.setIgnoreMouseEvents(true, { forward: true });
   if (widget && !widget.isDestroyed()) {
     widget.setIgnoreMouseEvents(false);
-    widget.setOpacity(1);
+    fadeTo(widget, 1, 260);
   }
   broadcastFrame();
   if (!settings.frameVisible) {
