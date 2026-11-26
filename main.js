@@ -981,10 +981,67 @@ function fadeTo(win, to, ms = 200) {
   });
 }
 
-// While blocks run (and between the questions of a Keep going run) the frame stays faded out,
-// rather than vanishing for every look at the screen.
+// A run keeps our windows still. Whatever is over the frame fades out once and stays out until
+// the run is over (Keep going counts as one run); everything else doesn't change at all.
 let frameQuiet = false;
 let frameBack = null;
+let runEnded = 0;
+const steady = { on: false, out: new Set() };
+
+/** Windows over the frame fade out once, and let clicks through until the run is over. */
+async function stepOut(wins) {
+  const fresh = wins.filter((win) => !steady.out.has(win));
+  if (!fresh.length) return;
+  for (const win of fresh) {
+    steady.out.add(win);
+    win.setIgnoreMouseEvents(true);
+  }
+  await Promise.all(fresh.map((win) => fadeTo(win, 0, 240)));
+  await wait(60);
+}
+
+/** The run is over: anything that stepped out comes back. */
+function letGo() {
+  steady.on = false;
+  for (const win of steady.out) {
+    if (win.isDestroyed()) continue;
+    win.setIgnoreMouseEvents(false);
+    fadeTo(win, 1, 320);
+  }
+  steady.out.clear();
+  if (frameQuiet) {
+    frameQuiet = false;
+    for (const win of overlays) fadeTo(win, OVERLAY_OPACITY, 340);
+  }
+}
+
+/** A picture taken during a run, with our own windows that are still showing painted out of it. */
+function coverOurs(image, areaDip) {
+  if (!steady.on) return image;
+  const wins = [widget, timerWin, viewer].filter((win) => win && !win.isDestroyed() && win.isVisible() && !steady.out.has(win) && overlapArea(win.getBounds(), areaDip) > 0);
+  if (!wins.length) return image;
+  const { width: W, height: H } = image.getSize();
+  const px = Buffer.from(image.toBitmap());
+  const [kx, ky] = [W / areaDip.width, H / areaDip.height];
+  for (const win of wins) {
+    const b = win.getBounds();
+    const x0 = Math.max(0, Math.floor((b.x - areaDip.x) * kx));
+    const x1 = Math.min(W - 1, Math.ceil((b.x + b.width - areaDip.x) * kx));
+    const y0 = Math.max(0, Math.floor((b.y - areaDip.y) * ky));
+    const y1 = Math.min(H - 1, Math.ceil((b.y + b.height - areaDip.y) * ky));
+    const from = (Math.min(H - 1, y0) * W + (x0 > 0 ? x0 - 1 : Math.min(W - 1, x1 + 1))) * 4;
+    const [cb, cg, cr] = [px[from], px[from + 1], px[from + 2]];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const i = (y * W + x) * 4;
+        px[i] = cb;
+        px[i + 1] = cg;
+        px[i + 2] = cr;
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(px, { width: W, height: H });
+}
 
 async function quietFrame() {
   clearTimeout(frameBack);
@@ -997,9 +1054,9 @@ function frameReturns(delay = 700) {
   clearTimeout(frameBack);
   frameBack = setTimeout(() => {
     if (filling || picking) return;
-    if (chain && running) return frameReturns(delay); // the next question is being answered
-    frameQuiet = false;
-    for (const win of overlays) fadeTo(win, OVERLAY_OPACITY, 340);
+    // The next question of a Keep going run is being answered, or about to be.
+    if (chain && (running || Date.now() - runEnded < 2500)) return frameReturns(delay);
+    letGo();
   }, delay);
 }
 
@@ -1008,6 +1065,10 @@ async function captureFrame() {
   const inTheWay = [widget, timerWin].filter(
     (win) => win && !win.isDestroyed() && win.isVisible() && overlapArea(win.getBounds(), settings.frame) > 0,
   );
+  if (steady.on) {
+    await stepOut(inTheWay);
+    return captureRect(settings.frame);
+  }
   if (inTheWay.length) {
     await Promise.all(inTheWay.map((win) => fadeTo(win, 0, 180)));
     await wait(60);
@@ -1777,6 +1838,16 @@ async function aside(area, fn) {
   const ours = [widget, timerWin, viewer].filter(
     (win) => win && !win.isDestroyed() && win.isVisible() && (!area || overlapArea(win.getBounds(), area) > 0),
   );
+  // During a run a click just passes through whatever is there: nothing needs to fade for it.
+  if (steady.on) {
+    const showing = ours.filter((win) => !steady.out.has(win));
+    for (const win of showing) win.setIgnoreMouseEvents(true);
+    try {
+      return await fn();
+    } finally {
+      for (const win of showing) if (!win.isDestroyed()) win.setIgnoreMouseEvents(false);
+    }
+  }
   for (const win of ours) win.setIgnoreMouseEvents(true);
   if (ours.length) await Promise.all(ours.map((win) => fadeTo(win, 0, 180)));
   try {
@@ -2426,6 +2497,697 @@ function clearPlan(answer, elements) {
   return null;
 }
 
+// ---------- boxes the page draws itself ----------
+// Maths and logic sites draw their own tiles and slots, which Windows often can't name or even list.
+// They are found in the picture, read, and filled in whichever way the page turns out to work.
+
+/** A value in a form that can be compared: "−23/2", "\frac{23}{2}" and "23 over 2" read the same. */
+function cleanValue(raw) {
+  let t = String(raw == null ? '' : raw).replace(/[​-‍⁠-⁤﻿$]/g, '').trim();
+  const tex = t.match(/([-−])?\s*\\[dt]?frac\s*\{\s*([^{}]*?)\s*\}\s*\{\s*([^{}]*?)\s*\}/);
+  if (tex) return `${tex[1] ? '-' : ''}${tex[2]}/${tex[3]}`;
+  const vulgar = { '½': '1/2', '⅓': '1/3', '⅔': '2/3', '¼': '1/4', '¾': '3/4', '⅕': '1/5', '⅖': '2/5', '⅗': '3/5', '⅘': '4/5', '⅙': '1/6', '⅚': '5/6', '⅛': '1/8', '⅜': '3/8', '⅝': '5/8', '⅞': '7/8' };
+  t = t
+    .replace(/\\(?:left|right|,|;|!)/g, '')
+    .replace(/\\times|\\cdot/g, '×')
+    .replace(/\\div/g, '÷')
+    .replace(/[−–—‒]/g, '-')
+    .replace(/[⁄∕]/g, '/')
+    .replace(/[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, (c) => vulgar[c])
+    .replace(/(\d)\s+over\s+(\d)/gi, '$1/$2')
+    .replace(/\s*\/\s*/g, '/')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (/^(?:minus|negative)$/i.test(t)) return '-';
+  if (/^plus$/i.test(t)) return '+';
+  if (/^times$/i.test(t)) return '×';
+  // Maths markup can be read out twice: "12 12".
+  const words = t.split(' ');
+  if (words.length === 2 && words[0] === words[1]) return words[0];
+  return t;
+}
+
+/** What a tile says. A fraction drawn as two stacked numbers is read as "23 2". */
+function tileValue(raw) {
+  const t = cleanValue(raw);
+  const stacked = t.match(/^(-?\d+) (\d+)$/);
+  return stacked ? `${stacked[1]}/${stacked[2]}` : t;
+}
+
+function numberIn(raw) {
+  const s = cleanValue(raw).replace(/\s/g, '').replace(/^\+(?=\d)/, '');
+  if (/^-?\d*\.?\d+$/.test(s)) return Number(s);
+  const m = s.match(/^(-?\d+)\/(\d+)$/);
+  return m && Number(m[2]) ? Number(m[1]) / Number(m[2]) : null;
+}
+
+function sameValue(a, b) {
+  const [x, y] = [cleanValue(a).toLowerCase().replace(/\s/g, ''), cleanValue(b).toLowerCase().replace(/\s/g, '')];
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [p, q] = [numberIn(x), numberIn(y)];
+  return p !== null && q !== null && Math.abs(p - q) < 1e-9;
+}
+
+/** An answer as separate pieces: numbers and fractions, words, and signs. */
+function mathTokens(raw) {
+  const flat = String(raw || '')
+    .replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '$1/$2')
+    .replace(/[−–—‒]/g, '-')
+    .replace(/\\(?:left|right|,|;|!)/g, '')
+    .replace(/[$\\{}()]/g, ' ');
+  return (flat.match(/\d+(?:\.\d+)?(?:\s*\/\s*\d+)?|\p{L}+|[=+\-×÷*<>≤≥]/gu) || []).map((t) => t.replace(/\s/g, ''));
+}
+
+/** Line an answer's pieces up with a row of text and boxes: what is left over goes in the boxes. */
+function alignParts(tokens, sequence) {
+  const count = sequence.filter((s) => s.slot != null).length;
+  const attempt = (list) => {
+    const parts = [];
+    let p = 0;
+    for (let s = 0; s < sequence.length; s++) {
+      const item = sequence[s];
+      if (item.lit != null) {
+        if (p < list.length && sameValue(list[p], item.lit)) p++;
+        continue;
+      }
+      const next = sequence[s + 1];
+      // "y = x + 3": nothing written before the x means 1.
+      if (next && next.lit != null && /^\p{L}$/u.test(next.lit) && p < list.length && sameValue(list[p], next.lit)) {
+        parts.push('1');
+        continue;
+      }
+      if (p >= list.length) return null;
+      parts.push(list[p++]);
+    }
+    return p === list.length && parts.length === count ? parts : null;
+  };
+  const signed = [];
+  tokens.forEach((t, n) => {
+    const before = tokens[n - 1];
+    if (/^[-+]$/.test(before || '') && /^\d/.test(t)) signed[signed.length - 1] = before === '-' ? `-${t}` : t;
+    else signed.push(t);
+  });
+  // A minus straight after "=" belongs to its number.
+  const leading = [];
+  tokens.forEach((t, n) => {
+    const before = tokens[n - 1];
+    if (before === '-' && /^\d/.test(t) && (n === 1 || /^[=+\-×÷*<>≤≥]$/.test(tokens[n - 2]))) leading[leading.length - 1] = `-${t}`;
+    else leading.push(t);
+  });
+  return attempt(leading) || attempt(tokens) || attempt(signed);
+}
+
+/**
+ * Boxes in the picture, bordered or just tinted, whether something is written in them or not. Each is
+ * a patch of one colour shut off from the page, in real screen pixels, in reading order.
+ */
+function pictureBoxes(image, rect) {
+  const { width: W, height: H } = image.getSize();
+  if (W * H > 4e6 || W < 40 || H < 40) return [];
+  const px = image.toBitmap();
+  const real = screen.dipToScreenRect(null, rect);
+  const k = W / rect.width;
+  const step = Math.max(1, Math.floor(k));
+  const [cols, rows] = [Math.floor(W / step), Math.floor(H / step)];
+  const label = new Int32Array(cols * rows).fill(-1);
+  const stack = new Int32Array(cols * rows);
+  const at = (c, r) => (r * step * W + c * step) * 4;
+  const patches = [];
+  let page = null;
+  let id = 0;
+  for (let start = 0; start < label.length; start++) {
+    if (label[start] >= 0) continue;
+    const seed = at(start % cols, Math.floor(start / cols));
+    const [b, g, r] = [px[seed], px[seed + 1], px[seed + 2]];
+    let top = 0;
+    stack[top++] = start;
+    label[start] = id;
+    let [n, x0, y0, x1, y1] = [0, cols, rows, 0, 0];
+    while (top) {
+      const cell = stack[--top];
+      const [x, y] = [cell % cols, Math.floor(cell / cols)];
+      n++;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      for (const next of [x > 0 ? cell - 1 : -1, x < cols - 1 ? cell + 1 : -1, y > 0 ? cell - cols : -1, y < rows - 1 ? cell + cols : -1]) {
+        if (next < 0 || label[next] >= 0) continue;
+        const i = at(next % cols, Math.floor(next / cols));
+        if (Math.abs(px[i] - b) + Math.abs(px[i + 1] - g) + Math.abs(px[i + 2] - r) > 14) continue;
+        label[next] = id;
+        stack[top++] = next;
+      }
+    }
+    const edge = x0 === 0 || y0 === 0 || x1 === cols - 1 || y1 === rows - 1;
+    if (edge && (!page || n > page.n)) page = { n, b, g, r };
+    const [bw, bh] = [(x1 - x0 + 1) * step, (y1 - y0 + 1) * step];
+    if (!edge && bw >= 26 * k && bh >= 18 * k && bw <= 420 * k && bh <= 170 * k && bw / bh <= 9 && n * step * step >= 0.55 * bw * bh) {
+      patches.push({ id, n, x0, y0, x1, y1, b, g, r });
+    }
+    id++;
+  }
+  const inside = (o, p) => o !== p && o.x0 >= p.x0 && o.x1 <= p.x1 && o.y0 >= p.y0 && o.y1 <= p.y1;
+  const [sx, sy] = [W / real.width, H / real.height];
+  const out = [];
+  for (const p of patches) {
+    if (patches.filter((o) => inside(o, p)).length >= 2) continue; // a panel holding tiles
+    const [mx, my] = [Math.ceil((p.x1 - p.x0 + 1) * 0.12), Math.ceil((p.y1 - p.y0 + 1) * 0.12)];
+    let [holes, cells] = [0, 0];
+    for (let y = p.y0 + my; y <= p.y1 - my; y++) {
+      for (let x = p.x0 + mx; x <= p.x1 - mx; x++) {
+        cells++;
+        if (label[y * cols + x] !== p.id) holes++;
+      }
+    }
+    const off = page ? Math.abs(p.b - page.b) + Math.abs(p.g - page.g) + Math.abs(p.r - page.r) : 0;
+    out.push({
+      x: Math.round(real.x + (((p.x0 + p.x1 + 1) / 2) * step) / sx),
+      y: Math.round(real.y + (((p.y0 + p.y1 + 1) / 2) * step) / sy),
+      w: Math.round(((p.x1 - p.x0 + 1) * step) / sx),
+      h: Math.round(((p.y1 - p.y0 + 1) * step) / sy),
+      empty: holes <= cells * 0.004,
+      tint: off > 10 && off <= 110,
+    });
+  }
+  const line = 24 / sy;
+  return out.sort((a, b) => Math.round(a.y / line) - Math.round(b.y / line) || a.x - b.x);
+}
+
+/** Whether anything stands out from the main colour of an area. */
+function hasInk(image, rect, box) {
+  const { width: W, height: H } = image.getSize();
+  const px = image.toBitmap();
+  const real = screen.dipToScreenRect(null, rect);
+  const [sx, sy] = [W / real.width, H / real.height];
+  const x0 = Math.max(0, Math.round((box.x - box.w / 2 - real.x) * sx));
+  const x1 = Math.min(W - 1, Math.round((box.x + box.w / 2 - real.x) * sx));
+  const y0 = Math.max(0, Math.round((box.y - box.h / 2 - real.y) * sy));
+  const y1 = Math.min(H - 1, Math.round((box.y + box.h / 2 - real.y) * sy));
+  if (x1 <= x0 || y1 <= y0) return false;
+  const counts = new Map();
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const i = (y * W + x) * 4;
+      const key = ((px[i] >> 4) << 8) | ((px[i + 1] >> 4) << 4) | (px[i + 2] >> 4);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  const main = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const [mb, mg, mr] = [((main >> 8) & 15) * 16 + 8, ((main >> 4) & 15) * 16 + 8, (main & 15) * 16 + 8];
+  let [off, all] = [0, 0];
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const i = (y * W + x) * 4;
+      all++;
+      if (Math.abs(px[i] - mb) + Math.abs(px[i + 1] - mg) + Math.abs(px[i + 2] - mr) > 70) off++;
+    }
+  }
+  return off >= 4 && off / all > 0.012;
+}
+
+/** Whether a slot has something in it now. */
+const boxHolds = (image, rect, box) => hasInk(image, rect, { x: box.x, y: box.y, w: box.w * 0.64, h: box.h * 0.6 });
+
+/** Blank slots shown only by a pale tint, with no border. There are two alike, or one and some tiles. */
+function tintedPlaces(boxes, known, found) {
+  const listed = known.filter((e) => e.w && e.h && e.type !== 'text');
+  const tinted = boxes.filter(
+    (b) =>
+      b.empty &&
+      b.tint &&
+      !listed.some((e) => Math.abs(b.x - e.x) < e.w / 2 && Math.abs(b.y - e.y) < e.h / 2) &&
+      !found.some((p) => Math.abs(b.x - p.x) < p.w / 2 && Math.abs(b.y - p.y) < p.h / 2),
+  );
+  const alike = tinted.filter((b) => tinted.some((o) => o !== b && Math.abs(o.w - b.w) <= b.w * 0.25 && Math.abs(o.h - b.h) <= b.h * 0.25));
+  const keep = alike.length ? alike : tinted.length === 1 && boxes.filter((b) => !b.empty).length >= 2 ? tinted : [];
+  const first = found.filter((p) => p.name.startsWith('empty box')).length;
+  return keep.map((b, n) => ({ type: 'place', name: `empty box ${first + n + 1}`, value: '', state: '', x: b.x, y: b.y, w: b.w, h: b.h }));
+}
+
+/** The empty places in a picture, in reading order. A box with so much as one thin letter in it isn't one. */
+function openPlaces(image, rect, listed, boxes) {
+  const inFull = (p) => boxes.some((b) => !b.empty && Math.abs(p.x - b.x) < b.w / 2 && Math.abs(p.y - b.y) < b.h / 2);
+  // The edge of a panel of tiles can look like a blank line, but a real gap has room on it.
+  const crowded = (p) =>
+    p.name.startsWith('empty gap') &&
+    boxes.some((t) => {
+      if (t.empty) return false;
+      const across = Math.min(p.x + p.w / 2, t.x + t.w / 2) - Math.max(p.x - p.w / 2, t.x - t.w / 2);
+      const down = Math.min(p.y + p.h / 2, t.y + t.h / 2) - Math.max(p.y - p.h / 2, t.y - t.h / 2);
+      return across > 0 && down > 0 && across * down > 0.08 * t.w * t.h;
+    });
+  const marked = emptyPlaces(image, rect, listed).filter((p) => !inFull(p) && !crowded(p));
+  return [...marked, ...tintedPlaces(boxes, listed, marked)].sort((a, b) => (Math.abs(a.y - b.y) < 14 ? a.x - b.x : a.y - b.y));
+}
+
+/** The frame as it is now, with its boxes and places. */
+async function lookAgain(rect) {
+  const [image, found] = await Promise.all([captureFrame(), frameElements(rect).catch(() => [])]);
+  const known = found.filter((e) => !((e.type === 'button' || e.type === 'hyperlink') && SUBMIT_WORDS.test(e.name)));
+  const boxes = pictureBoxes(image, rect);
+  return { image, rect, known, boxes, places: openPlaces(image, rect, found, boxes) };
+}
+
+/** The part of the picture a box covers, a few times bigger, for reading. */
+function boxPicture(image, rect, box) {
+  const { width: W, height: H } = image.getSize();
+  const real = screen.dipToScreenRect(null, rect);
+  const [sx, sy] = [W / real.width, H / real.height];
+  const x = Math.max(0, Math.round((box.x - box.w / 2 - real.x) * sx) + 1);
+  const y = Math.max(0, Math.round((box.y - box.h / 2 - real.y) * sy) + 1);
+  const width = Math.min(W - x, Math.round(box.w * sx) - 2);
+  const height = Math.min(H - y, Math.round(box.h * sy) - 2);
+  if (width < 6 || height < 6) return null;
+  const crop = image.crop({ x, y, width, height });
+  return { crop, big: crop.resize({ width: width * 3, height: height * 3, quality: 'best' }) };
+}
+
+/** What a box says: from Windows' list if it is there, else read off the picture, else by the model. */
+async function tileName(box, view, memo, signal) {
+  const inside = view.known.filter(
+    (e) => e.name && e.name.length <= 40 && !['place', 'group', 'image'].includes(e.type) && Math.abs(e.x - box.x) <= box.w / 2 + 2 && Math.abs(e.y - box.y) <= box.h / 2 + 2,
+  );
+  const control = inside.find((e) => e.type !== 'text');
+  if (control) return tileValue(control.name);
+  const texts = inside.filter((e) => e.type === 'text');
+  if (texts.length === 2 && Math.abs(texts[0].x - texts[1].x) < 12 && texts.every((e) => /^-?\d+$/.test(e.name.trim()))) {
+    const [a, b] = [...texts].sort((p, q) => p.y - q.y);
+    return `${a.name.trim()}/${b.name.trim()}`;
+  }
+  if (texts.length) return tileValue([...texts].sort((p, q) => p.x - q.x).map((e) => e.name).join(' '));
+  const picture = boxPicture(view.image, view.rect, box);
+  if (!picture) return '';
+  const bytes = picture.crop.toBitmap();
+  let key = 2166136261;
+  for (let i = 0; i < bytes.length; i += 3) key = Math.imul(key ^ bytes[i], 16777619);
+  if (memo.has(key)) return memo.get(key);
+  let name = '';
+  const bar = fractionBar(view.image, view.rect, box);
+  if (bar !== null) {
+    const [top, bottom] = [box.y - box.h / 2, box.y + box.h / 2];
+    const upper = boxPicture(view.image, view.rect, { x: box.x, y: (top + bar) / 2 - 1, w: box.w, h: bar - top - 2 });
+    const lower = boxPicture(view.image, view.rect, { x: box.x, y: (bar + bottom) / 2 + 1, w: box.w, h: bottom - bar - 2 });
+    if (upper && lower) {
+      const [a, b] = [await readTile(upper, signal), await readTile(lower, signal)];
+      if (/^-?\d+$/.test(a) && /^\d+$/.test(b)) name = `${a}/${b}`;
+    }
+  }
+  if (!name) name = await readTile(picture, signal);
+  memo.set(key, name);
+  return name;
+}
+
+/** Reads a picture of a tile: Windows' reader first, then the model for what it misses. */
+async function readTile(picture, signal) {
+  const file = path.join(app.getPath('temp'), `screensage-tile-${process.pid}.png`);
+  let name = '';
+  try {
+    fs.writeFileSync(file, picture.big.toPNG());
+    const words = await input.readWords(file);
+    const lines = new Map();
+    for (const w of words) lines.set(w.line, [...(lines.get(w.line) || []), w]);
+    const said = [...lines.values()].sort((a, b) => a[0].y - b[0].y).map((l) => l.sort((a, b) => a.x - b.x).map((w) => w.t).join(' '));
+    name = said.length === 2 && said.every((t) => /^-?\d+$/.test(t)) ? `${said[0]}/${said[1]}` : tileValue(said.join(' '));
+  } catch {
+    name = '';
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+  if (name && name.length <= 24) return name;
+  // A lone letter or sign is what the reader tends to miss.
+  const reply = await shortReply({
+    messages: [
+      { role: 'system', content: 'The picture is one tile from a quiz. Reply with only what is written on it, exactly: a letter, word, number or sign. Write a fraction as a/b. If it is blank, reply: blank' },
+      { role: 'user', content: 'What is on this tile?', images: [picture.big.toJPEG(92).toString('base64')] },
+    ],
+    temperature: 0,
+    signal,
+    most: 40,
+  }).catch((error) => {
+    if (signal.aborted) throw error;
+    return '';
+  });
+  const read = tileValue(toPlain(answerOf(reply) || reply).trim().replace(/^["'`]|["'`.]$/g, ''));
+  return /^blank$/i.test(read) ? '' : read;
+}
+
+/** Where a fraction's bar is in a box (real pixels): a thin line across the middle, with marks above and below it. */
+function fractionBar(image, rect, box) {
+  const { width: W, height: H } = image.getSize();
+  const px = image.toBitmap();
+  const real = screen.dipToScreenRect(null, rect);
+  const [sx, sy] = [W / real.width, H / real.height];
+  const x0 = Math.max(0, Math.round((box.x - box.w / 2 - real.x) * sx) + 2);
+  const x1 = Math.min(W - 1, Math.round((box.x + box.w / 2 - real.x) * sx) - 2);
+  const y0 = Math.max(0, Math.round((box.y - box.h / 2 - real.y) * sy) + 2);
+  const y1 = Math.min(H - 1, Math.round((box.y + box.h / 2 - real.y) * sy) - 2);
+  if (x1 - x0 < 12 || y1 - y0 < 16) return null;
+  const c = ((y0 + 1) * W + x0 + 1) * 4;
+  const ink = (x, y) => {
+    const i = (y * W + x) * 4;
+    return Math.abs(px[i] - px[c]) + Math.abs(px[i + 1] - px[c + 1]) + Math.abs(px[i + 2] - px[c + 2]) > 90;
+  };
+  const inRow = (y, a, b) => {
+    let n = 0;
+    for (let x = a; x <= b; x++) if (ink(x, y)) n++;
+    return n;
+  };
+  const gap = Math.max(2, Math.round(2 * sy));
+  const height = y1 - y0;
+  for (let y = y0 + Math.round(height * 0.32); y <= y0 + Math.round(height * 0.68); y++) {
+    let [best, start, run, runStart] = [0, 0, 0, 0];
+    for (let x = x0; x <= x1; x++) {
+      if (ink(x, y)) {
+        if (!run) runStart = x;
+        run++;
+        if (run > best) [best, start] = [run, runStart];
+      } else run = 0;
+    }
+    if (best < 10 * sx || best > (x1 - x0) * 0.85) continue;
+    const end = start + best - 1;
+    // Clear just above and below the line, so it isn't the middle stroke of a letter.
+    if (inRow(y - gap - 1, start, end) > best * 0.15 || inRow(y + gap + 1, start, end) > best * 0.15) continue;
+    let [above, below] = [0, 0];
+    for (let r = y0; r < y - gap; r++) above += inRow(r, start, end);
+    for (let r = y + gap + 1; r <= y1; r++) below += inRow(r, start, end);
+    if (above >= 6 && below >= 6) return real.y + y / sy;
+  }
+  return null;
+}
+
+/** The tiles waiting to be placed: anything short outside the slots. */
+async function poolTiles(view, homes, memo, signal) {
+  const real = screen.dipToScreenRect(null, view.rect);
+  const scale = real.width / view.rect.width;
+  const inHome = (t) => homes.some((h) => Math.abs(t.x - h.x) < h.w / 2 + 3 && Math.abs(t.y - h.y) < h.h / 2 + 3);
+  const out = [];
+  for (const b of view.boxes) {
+    if (b.empty || inHome(b) || b.h > 120 * scale || b.w > 260 * scale) continue;
+    const name = await tileName(b, view, memo, signal);
+    if (name && name.length <= 24 && !SUBMIT_WORDS.test(name)) out.push({ ...b, name });
+    if (out.length >= 16) break;
+  }
+  const kinds = new Set(['button', 'splitbutton', 'listitem', 'custom', 'menuitem']);
+  for (const e of view.known) {
+    if (!kinds.has(e.type) || !e.name || e.name.length > 24 || inHome(e)) continue;
+    if (out.some((t) => Math.abs(t.x - e.x) < t.w / 2 && Math.abs(t.y - e.y) < t.h / 2)) continue;
+    out.push({ x: e.x, y: e.y, w: e.w, h: e.h, name: tileValue(e.name) });
+  }
+  return out;
+}
+
+/** The names an answer mentions, in the order it mentions them. */
+function namesIn(answer, names) {
+  const plain = toPlain(answer).replace(/\s+/g, ' ').replace(/[−–—]/g, '-');
+  const hits = [];
+  for (const name of new Set(names)) {
+    const safe = name.replace(/[.*+?^$()|[\]{}\\/-]/g, '\\$&');
+    // A lone letter must match exactly, or the word "a" would count as tile A.
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}/.])${safe}(?![\\p{L}\\p{N}/])`, name.length === 1 ? 'gu' : 'giu');
+    for (const m of plain.matchAll(pattern)) hits.push({ at: m.index, end: m.index + m[0].length, name });
+  }
+  hits.sort((a, b) => a.at - b.at || b.end - a.end);
+  const order = [];
+  let reached = 0;
+  for (const h of hits) {
+    if (h.at < reached) continue;
+    order.push(h.name);
+    reached = h.end;
+  }
+  if (order.length) return order;
+  // "ACBD" with no spaces, for single-letter tiles.
+  const joined = [...plain.replace(/[^\p{L}\p{N}]/gu, '')];
+  return names.every((n) => n.length === 1) && joined.length && joined.every((c) => names.includes(c)) ? joined : [];
+}
+
+/** Tiles to go into blank slots, if the answer says which tile goes where. */
+async function tilePlan(answer, view, memo, signal) {
+  const { places } = view;
+  if (!places.length) return null;
+  const pool = await poolTiles(view, places, memo, signal);
+  if (pool.length < places.length) return null;
+  const names = pool.map((t) => t.name);
+  const order = namesIn(answer, names);
+  if (order.length !== places.length) return null;
+  for (const name of new Set(order)) {
+    if (order.filter((n) => n === name).length > names.filter((n) => n === name).length) return null;
+  }
+  return { order, homes: places.map(({ x, y, w, h }) => ({ x, y, w, h })) };
+}
+
+/** Put one tile in a slot, however this page does it: a tap, a tap and then the slot, or a drag. */
+async function placeTile(tile, spot, rect, how, signal, open) {
+  const check = () => {
+    if (signal.aborted) throw Object.assign(new Error('stopped'), { code: 'aborted' });
+  };
+  const landed = async () => {
+    await pause(280, signal);
+    const now = await lookAgain(rect);
+    // The page can close up once a tile has gone, so a slot fewer counts as well as the slot itself.
+    const held = now.places.length < open || boxHolds(now.image, rect, spot);
+    if (process.env.SAGE_DEBUG) console.log(`tile "${tile.name}" at ${tile.x},${tile.y} to ${spot.x},${spot.y}: ${held ? 'landed' : 'not yet'}`);
+    return held;
+  };
+  if (how.way === 'drag') {
+    await aside(rect, () => dragBetween(tile, spot, check));
+    return landed();
+  }
+  await aside(rect, () => clickAt(tile));
+  if (how.way !== 'then' && (await landed())) {
+    how.way = 'tap';
+    return true;
+  }
+  await aside(rect, () => clickAt(spot));
+  if (await landed()) {
+    how.way = 'then';
+    return true;
+  }
+  await aside(rect, () => dragBetween(tile, spot, check));
+  if (await landed()) {
+    how.way = 'drag';
+    return true;
+  }
+  return false;
+}
+
+/** Each tile into the next free slot, looking again after each, since the page moves things about. */
+async function fillTiles(plan, view, memo, signal) {
+  const how = {};
+  let done = 0;
+  let look = view;
+  for (const want of plan.order) {
+    if (done) look = await lookAgain(view.rect);
+    const spot = look.places[0];
+    if (!spot) return { done, ok: false };
+    const homes = [...plan.homes, ...look.places];
+    const pool = (await poolTiles(look, homes, memo, signal)).filter((t) => Math.abs(t.y - spot.y) >= spot.h * 0.6);
+    const tile = pool.find((t) => sameValue(t.name, want));
+    if (!tile || !(await placeTile(tile, spot, view.rect, how, signal, look.places.length))) return { done, ok: false };
+    done++;
+  }
+  return { done, ok: true };
+}
+
+/**
+ * A line of boxes set in text ("y = [ ] x [ ] [ ]"), each of which opens its own choices. Plain rows of
+ * answer buttons aren't this: they have no text between them, and nothing says they want filling in.
+ */
+function slotRow(answer, view) {
+  const { image, rect, known, boxes } = view;
+  const scale = screen.dipToScreenRect(null, rect).width / rect.width;
+  const fixed = new Set(['edit', 'combobox', 'document', 'spinner', 'radiobutton', 'checkbox', 'slider']);
+  const free = boxes.filter(
+    (b) => b.h <= 110 * scale && b.w <= 260 * scale && !known.some((e) => fixed.has(e.type) && Math.abs(e.x - b.x) <= Math.max(e.w, b.w) / 2 && Math.abs(e.y - b.y) <= Math.max(e.h, b.h) / 2),
+  );
+  const rows = [];
+  for (const b of free) {
+    const row = rows.find((r) => Math.abs(r.y - b.y) < Math.max(r.h, b.h) * 0.5);
+    if (row) row.slots.push(b);
+    else rows.push({ y: b.y, h: b.h, slots: [b] });
+  }
+  for (const row of rows.sort((a, b) => a.y - b.y)) {
+    row.slots.sort((a, b) => a.x - b.x);
+    const { slots } = row;
+    if (Math.max(...slots.map((s) => s.h)) > Math.min(...slots.map((s) => s.h)) * 1.6) continue;
+    const margin = 6 * scale;
+    const band = row.h * 0.7;
+    let inline = hasInk(image, rect, { x: slots[0].x - slots[0].w / 2 - margin - 50 * scale, y: row.y, w: 100 * scale, h: band });
+    for (let n = 1; n < slots.length && !inline; n++) {
+      const [left, right] = [slots[n - 1].x + slots[n - 1].w / 2 + margin, slots[n].x - slots[n].w / 2 - margin];
+      if (right - left >= 4 * scale) inline = hasInk(image, rect, { x: (left + right) / 2, y: row.y, w: right - left, h: band });
+    }
+    if (!inline) continue;
+    const others = boxes.filter((b) => !b.empty && !slots.includes(b) && Math.abs(b.y - row.y) > row.h);
+    if (!slots.some((s) => s.empty) && others.length < 3 && !/=/.test(toPlain(answer))) continue;
+    const inBox = (e) => slots.some((s) => Math.abs(e.x - s.x) <= s.w / 2 + 2 && Math.abs(e.y - s.y) <= s.h / 2 + 2);
+    const words = known.filter((e) => e.type === 'text' && Math.abs(e.y - row.y) < row.h * 0.6 && !inBox(e));
+    const sequence = [
+      ...slots.map((s, slot) => ({ x: s.x, slot })),
+      ...words.flatMap((e) => mathTokens(e.name).map((lit, n) => ({ x: e.x - e.w / 2 + n, lit }))),
+    ].sort((a, b) => a.x - b.x);
+    return { ...row, sequence };
+  }
+  return null;
+}
+
+/** What goes in each box of the row, from the answer, or by asking the model if it doesn't line up. */
+async function slotAnswers(answer, row, view, signal) {
+  const plain = toPlain(answer).trim();
+  let { sequence } = row;
+  // Nothing listed the row's words (a canvas): read them off the picture.
+  if (!sequence.some((s) => s.lit != null)) {
+    const [left, right] = [row.slots[0].x - row.slots[0].w / 2 - 130, row.slots[row.slots.length - 1].x + row.slots[row.slots.length - 1].w / 2 + 40];
+    const strip = boxPicture(view.image, view.rect, { x: (left + right) / 2, y: row.y, w: right - left, h: row.h });
+    if (strip) {
+      const file = path.join(app.getPath('temp'), `screensage-row-${process.pid}.png`);
+      try {
+        fs.writeFileSync(file, strip.big.toPNG());
+        const words = await input.readWords(file);
+        const k = strip.big.getSize().width / (right - left);
+        const inBox = (x) => row.slots.some((s) => Math.abs(x - s.x) <= s.w / 2);
+        const lits = words
+          .map((w) => ({ x: left + (w.x + w.w / 2) / k, t: w.t }))
+          .filter((w) => !inBox(w.x))
+          .flatMap((w) => mathTokens(w.t).map((lit) => ({ x: w.x, lit })));
+        sequence = [...sequence, ...lits].sort((a, b) => a.x - b.x);
+      } catch {
+        // The model is asked below.
+      } finally {
+        fs.rmSync(file, { force: true });
+      }
+    }
+  }
+  const lined = alignParts(mathTokens(plain), sequence);
+  if (lined) return lined;
+  const count = row.slots.length;
+  const list = plain.split(/\n|;|,/).map((l) => l.trim().replace(/^[-•*]\s+/, '')).filter(Boolean);
+  if (list.length === count) return list.map((l) => cleanValue(l.replace(/^.*[:=]\s*/, '')));
+  const shape = sequence.map((s) => (s.lit != null ? s.lit : `[box ${s.slot + 1}]`)).join(' ');
+  const ask = async (how) => {
+    const reply = await shortReply({
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'Read the question in the capture and work out its whole answer.',
+            `The answer goes into a line that reads: ${shape}`,
+            'What the boxes show now may be wrong, and an open list of choices is not the answer, so ignore them.',
+            ...(mathTokens(plain).length >= count ? [`The answer is: ${plain}`] : []),
+            how,
+          ].join('\n'),
+        },
+        { role: 'user', content: 'What is the answer?', images: [view.image.toJPEG(88).toString('base64')] },
+      ],
+      temperature: 0,
+      signal,
+      most: 200,
+    }).catch((error) => {
+      if (signal.aborted) throw error;
+      return '';
+    });
+    if (process.env.SAGE_DEBUG) console.log(`row reply: ${JSON.stringify(reply)}`);
+    return String(reply || '').replace(/<\/?answer>/gi, '');
+  };
+  // The whole line first: signs and numbers then fall into their own boxes.
+  const whole = alignParts(mathTokens(await ask('Reply with only that line, written out with the right values in place of the boxes. Write a fraction as a/b.')), sequence);
+  if (whole) return whole;
+  const raw = await ask(`Reply with exactly ${count} lines, what goes in each box in order, and nothing else. A sign goes in its own box if the line has one for it. Write a fraction as a/b.`);
+  const said = raw.split('\n').map((l) => cleanValue(l.replace(/^\s*(?:\[?box\s*\d+\]?\s*[:=]?|\d+[.)]\s)\s*/i, '').replace(/[`*]/g, ''))).filter(Boolean);
+  return said.length === count ? said : alignParts(mathTokens(raw), sequence);
+}
+
+/** The choices showing now: every short tile that isn't in the row itself. */
+async function shownOptions(look, row, memo, signal) {
+  const scale = screen.dipToScreenRect(null, look.rect).width / look.rect.width;
+  const out = [];
+  for (const b of look.boxes) {
+    if (b.empty || Math.abs(b.y - row.y) < row.h * 0.7 || b.h > 120 * scale || b.w > 260 * scale) continue;
+    const name = await tileName(b, look, memo, signal);
+    if (name && name.length <= 24 && !SUBMIT_WORDS.test(name)) out.push({ ...b, name });
+    if (out.length >= 24) break;
+  }
+  const kinds = new Set(['listitem', 'menuitem', 'button', 'splitbutton', 'custom', 'dataitem']);
+  for (const e of look.known) {
+    if (!kinds.has(e.type) || !e.name || e.name.length > 24 || Math.abs(e.y - row.y) < row.h * 0.7) continue;
+    if (out.some((t) => Math.abs(t.x - e.x) < t.w / 2 && Math.abs(t.y - e.y) < t.h / 2)) continue;
+    out.push({ x: e.x, y: e.y, w: e.w, h: e.h, name: tileValue(e.name) });
+  }
+  return out;
+}
+
+/** The choice that means the same as the wanted value, when none is written the same way. */
+async function pickOption(want, options, image, signal) {
+  const names = [...new Set(options.map((o) => o.name))];
+  const reply = await shortReply({
+    messages: [
+      {
+        role: 'system',
+        content: [`A box in a question needs the value: ${want}`, 'These are its choices:', ...names.map((n) => `- ${n}`), 'Reply with only the choice that means the same, copied exactly. If none does, reply: none'].join('\n'),
+      },
+      { role: 'user', content: 'Which choice?', images: [image.toJPEG(88).toString('base64')] },
+    ],
+    temperature: 0,
+    signal,
+    most: 60,
+  }).catch((error) => {
+    if (signal.aborted) throw error;
+    return '';
+  });
+  const said = toPlain(answerOf(reply) || reply).trim();
+  const name = names.find((n) => sameValue(n, said));
+  return name ? options.find((o) => o.name === name) : null;
+}
+
+/** Open each box in the row and press the choice it needs. Null if the boxes turn out not to open anything. */
+async function fillSlots(row, answer, view, memo, signal) {
+  const parts = await slotAnswers(answer, row, view, signal);
+  if (process.env.SAGE_DEBUG) console.log(`slot answers: ${parts ? parts.join(' | ') : 'none'}`);
+  if (!parts) return null;
+  const { rect } = view;
+  const current = (look) => {
+    const same = look.boxes.filter((b) => Math.abs(b.y - row.y) < row.h * 0.6 && b.h <= row.h * 1.5 && b.h >= row.h * 0.6).sort((a, b) => a.x - b.x);
+    return same.length === row.slots.length ? same : row.slots;
+  };
+  let done = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    let wrong = 0;
+    for (let n = 0; n < parts.length; n++) {
+      const look = await lookAgain(rect);
+      const slot = current(look)[n];
+      const holds = boxHolds(look.image, rect, slot) ? await tileName(slot, look, memo, signal) : '';
+      if (holds && sameValue(holds, parts[n])) continue;
+      wrong++;
+      await aside(rect, () => clickAt(slot));
+      await pause(380, signal);
+      const open = await lookAgain(rect);
+      const options = await shownOptions(open, row, memo, signal);
+      if (process.env.SAGE_DEBUG) console.log(`box ${n + 1} holds "${holds}", wants "${parts[n]}", choices: ${options.map((o) => o.name).join(' ')}`);
+      if (!options.length) return done ? { done, ok: false } : null;
+      const pick = options.find((o) => sameValue(o.name, parts[n])) || (await pickOption(parts[n], options, open.image, signal));
+      if (!pick) return done ? { done, ok: false } : null;
+      await aside(rect, () => clickAt(pick));
+      await pause(320, signal);
+      done++;
+    }
+    if (!wrong) return { done, ok: true };
+  }
+  return { done, ok: true };
+}
+
+/** Questions made of boxes the page draws itself. Null when this isn't one. */
+async function fillBoxes(answer, view, signal) {
+  if (!view.boxes.length) return null;
+  const memo = new Map();
+  const plan = await tilePlan(answer, view, memo, signal);
+  if (process.env.SAGE_DEBUG) console.log(`boxes: ${view.boxes.map((b) => `${b.empty ? 'empty' : 'full'}${b.tint ? '/tint' : ''} ${b.x},${b.y} ${b.w}x${b.h}`).join('; ')}\nplaces: ${view.places.map((p) => `${p.name} ${p.x},${p.y} ${p.w}x${p.h}`).join('; ')}\ntile plan: ${plan ? plan.order.join(' ') : 'none'}`);
+  if (plan) return fillTiles(plan, view, memo, signal);
+  const row = slotRow(answer, view);
+  if (process.env.SAGE_DEBUG) console.log(`slot row: ${row ? row.sequence.map((p) => (p.lit != null ? p.lit : `[${p.slot}]`)).join(' ') : 'none'}`);
+  return row ? fillSlots(row, answer, view, memo, signal) : null;
+}
+
 /** How many separate answers the page takes, when that can be told from its controls. */
 function partsNeeded(elements) {
   const fields = elements.filter((e) => TYPING.has(e.type) && !/\b(?:search|find|filter|url|address)\b/i.test(e.name));
@@ -2586,12 +3348,28 @@ async function fillCore(given, controller) {
     const fewThings = listed.filter((e) => e.type !== 'text' || e.name.length <= 40).length < 2;
     const read = fewThings ? await wordsOnPage(rect, listed) : [];
     const known = [...listed, ...read];
-    const elements = [...known, ...emptyPlaces(image, rect, known), ...colourShapes(image, rect, known)];
+    const boxes = pictureBoxes(image, rect);
+    const places = openPlaces(image, rect, [...found, ...read], boxes);
+    const elements = [...known, ...places, ...colourShapes(image, rect, known)];
     const note = done.length
       ? `Already done: ${done.join('; ')}.\nThis is the screen now. Check it: if the answer is fully in, reply done. Otherwise give only the commands for what is still missing or wrong.`
       : 'This is the screen now.';
     const hint = lastFill && lastFill.frame === frameKey(rect) && Date.now() - lastFill.time < 30 * 60000 ? lastFill.how : '';
     if (roundNo === 0) answer = await completeAnswer(answer, elements, image, controller.signal);
+    // Tiles into blank slots, and lines of boxes that each open their own choices.
+    if (roundNo === 0) {
+      const boxed = await fillBoxes(answer, { image, rect, known, boxes, places }, controller.signal);
+      if (boxed && boxed.ok) {
+        acted.push('box');
+        break;
+      }
+      if (boxed && boxed.done) {
+        acted.push('box');
+        done.push(`put ${boxed.done} of the answers into their boxes`);
+        await pause(500, controller.signal);
+        continue;
+      }
+    }
     // Moves the answer already spells out don't need the model to work them out again.
     let clear = roundNo === 0 ? clearPlan(answer, elements) : null;
     if (roundNo === 0 && clear === null) {
@@ -2698,7 +3476,11 @@ async function automate(kind, job) {
   tell('auto:state', { on: true, kind });
   holdEscape(controller);
   for (const win of overlays) win.setIgnoreMouseEvents(true);
-  await quietFrame();
+  clearTimeout(frameBack);
+  steady.on = true;
+  // The frame only has to go if its shade would darken a look outside it.
+  const looksOutside = kind === 'steps' && settings.frameStyle.shade && settings.steps.list.some((s) => s.type === 'click' || (s.type === 'find' && s.where === 'screen'));
+  if (looksOutside && !frameQuiet) await quietFrame();
   let error = null;
   let result = null;
   try {
@@ -2711,7 +3493,8 @@ async function automate(kind, job) {
     releaseEscape();
     for (const win of overlays) if (!win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: true });
     filling = null;
-    tell('auto:state', { on: false, kind, error, result, stopped: controller.signal.aborted });
+    runEnded = Date.now();
+    tell('auto:state', { on: false, kind, error, result, stopped: controller.signal.aborted, next: !!chain && !error && !controller.signal.aborted });
     raiseFloating();
     frameReturns();
   }
@@ -2817,6 +3600,7 @@ function areaAround(point) {
 
 /** A picture of an area without our windows or the frame's shade in it. */
 async function cleanCapture(areaDip, options = {}) {
+  if (steady.on) return coverOurs(await captureRect(areaDip, { full: true, ...options }), areaDip);
   // During a run the frame is already faded out; otherwise it fades out for the picture and back.
   const overlayWins = frameQuiet ? [] : [...overlays].filter((win) => !win.isDestroyed() && win.isVisible());
   await Promise.all(overlayWins.map((win) => fadeTo(win, 0, 180)));
@@ -3154,6 +3938,14 @@ async function locate({ name, type, look, near, area, wide, description }, signa
     }
   }
   if (signal.aborted) throw stopped();
+  // It may be under one of our windows: move that out of the way and look once more.
+  if (steady.on) {
+    const covering = [widget, timerWin].filter((win) => win && !win.isDestroyed() && win.isVisible() && !steady.out.has(win) && overlapArea(win.getBounds(), area) > 0);
+    if (covering.length) {
+      await stepOut(covering);
+      return locate({ name, type, look, near, area, wide, description }, signal);
+    }
+  }
   if (type === 'look' && !description && name === 'What you pointed at') return null; // nothing to ask about
   return aiLocate(description || describe({ name, type }), area, signal).catch((error) => {
     if (signal.aborted) throw stopped();
@@ -3164,7 +3956,7 @@ async function locate({ name, type, look, near, area, wide, description }, signa
 
 /** A small picture of an area (about a third of its size), for telling whether anything changed. */
 async function snapshot(areaDip) {
-  const image = await captureRect(areaDip, { full: true, shrink: 3 });
+  const image = coverOurs(await captureRect(areaDip, { full: true, shrink: 3 }), areaDip);
   return image.resize({ width: Math.max(32, Math.min(320, Math.round(areaDip.width / 3))), quality: 'good' }).toBitmap();
 }
 
@@ -3667,7 +4459,7 @@ function startPick() {
     picking = { resolve };
     clearTimeout(hideTimer);
     clearTimeout(frameBack);
-    frameQuiet = false;
+    letGo();
     showOverlays();
     for (const win of overlays) {
       win.setIgnoreMouseEvents(false);

@@ -301,7 +301,13 @@ function newCard(meta) {
   el.append(answer, explain.wrap, working.wrap, thinking.wrap, actions);
   thread.appendChild(el);
 
-  const c = { el, answer, explain, working, thinking, actions, text: '', thoughts: '', done: false, shown: false, parts: { answer: '' } };
+  const c = { el, answer, explain, working, thinking, actions, text: '', thoughts: '', done: false, shown: false, revealing: false, parts: { answer: '' } };
+  // The answer fades in once, and new words arriving don't cut that short.
+  answer.addEventListener('animationend', (event) => {
+    if (event.target !== answer) return;
+    c.revealing = false;
+    answer.classList.remove('reveal');
+  });
   actions.querySelector('.retry').addEventListener('click', () => {
     if (!busy && live && c === lastCard) api.retry();
   });
@@ -324,10 +330,10 @@ function paint(c) {
   c.parts = splitReply(c.text, c.done);
   const { answer, explain, working } = c.parts;
   if (answer) {
-    const reveal = !c.shown;
+    if (!c.shown) c.revealing = true;
     c.shown = true;
     const visible = answer.replace(/\\[a-z]+|[{}$^_\\]/gi, '').length; // what shows, not the LaTeX behind it
-    c.answer.className = `answer${visible > 140 ? ' long' : ''}${reveal ? ' reveal' : ''}`;
+    c.answer.className = `answer${visible > 140 ? ' long' : ''}${c.revealing ? ' reveal' : ''}`;
     c.answer.innerHTML = markdown(answer, c.done);
   } else if (c.done) {
     c.answer.className = 'answer quiet';
@@ -436,24 +442,41 @@ function finish() {
     paint(card);
   }
   card = null;
-  setBusy(autoRunning); // a new answer asked for by Check result comes mid-run
+  if (chaining) keepChaining();
+  setBusy(autoRunning || chaining); // a new answer asked for by Check result comes mid-run
 }
 
 api.onDone(finish);
 
 // Fill in and the steps: the Answer button turns into Stop until they finish.
 let autoRunning = false;
-const RUN_TOASTS = ['Filling in. Press Esc to stop.', 'Running your blocks. Press Esc to stop.'];
+// Between the questions of a Keep going run nothing changes: the button stays on Stop.
+let chaining = false;
+let chainTimer = null;
+function keepChaining() {
+  chaining = true;
+  clearTimeout(chainTimer);
+  chainTimer = setTimeout(() => {
+    chaining = false;
+    if (!card && !autoRunning) setBusy(false);
+  }, 2500);
+}
 api.onAuto((run) => {
   autoRunning = run.on;
-  setBusy(run.on);
-  markRunning(run.on && run.kind === 'steps' ? run.index : -1);
+  if (run.on || !run.next) {
+    chaining = false;
+    clearTimeout(chainTimer);
+  } else keepChaining();
+  setBusy(run.on || chaining);
   if (run.on) {
-    if (run.index == null) toast(run.kind === 'fill' ? RUN_TOASTS[0] : RUN_TOASTS[1]);
-  } else if (run.error) toast(run.error);
+    if (run.kind === 'steps' && run.index != null) markRunning(run.index);
+    return;
+  }
+  if (chaining) return;
+  markRunning(-1);
+  if (run.error) toast(run.error);
   else if (run.stopped) toast('Stopped.');
   else if (run.kind === 'fill' && !run.result) toast('Nothing to fill in here.');
-  else if (RUN_TOASTS.includes($('toast').textContent)) hideToast(); // keep anything said during the run
 });
 
 // A block that is waiting shows the time left in place of its summary.
