@@ -566,7 +566,7 @@ function glassWindow(options) {
     maximizable: false,
     minimizable: false,
     fullscreenable: false,
-    // A tool window: no taskbar button, and Windows keeps it on every virtual desktop.
+    // Auxiliary windows stay out of the taskbar.
     skipTaskbar: true,
     show: false,
     icon: appIcon(256),
@@ -605,7 +605,10 @@ function createWidget() {
   const saved = settings.widgetPos;
   let pos = saved && { x: saved.x, y: saved.bottom ? saved.y - height : saved.y };
   if (!pos || !onSomeScreen({ ...pos, width: WIDGET.width, height }, 4000)) pos = cornerPosition(height);
-  widget = glassWindow({ x: pos.x, y: pos.y, width: WIDGET.width, height, title: 'ScreenSage' });
+  widget = glassWindow({
+    x: pos.x, y: pos.y, width: WIDGET.width, height, title: 'ScreenSage',
+    skipTaskbar: false, minimizable: true,
+  });
   widget.loadFile(path.join(__dirname, 'renderer', 'widget.html'));
   widget.once('ready-to-show', () => {
     widget.showInactive();
@@ -614,6 +617,13 @@ function createWidget() {
   widget.on('moved', () => {
     settings.widgetPos = anchorOf(widget.getBounds());
     saveSettings();
+  });
+  widget.on('minimize', () => {
+    for (const win of overlays) win.hide();
+  });
+  widget.on('restore', () => {
+    if (settings.frameVisible) showOverlays();
+    raiseFloating();
   });
   widget.on('close', (event) => {
     if (quitting || !settings.behaviour.closeToTray) return;
@@ -677,6 +687,7 @@ function resetPositions() {
 
 function showWidget() {
   if (!widget) return;
+  if (widget.isMinimized()) widget.restore();
   if (!widget.isVisible()) {
     widget.showInactive();
     if (settings.frameVisible) showOverlays();
@@ -799,6 +810,7 @@ function broadcastFrame(except) {
 }
 
 function showOverlays() {
+  if (widget?.isMinimized()) return;
   for (const win of overlays) if (!win.isVisible()) win.showInactive();
   raiseFloating();
 }
@@ -833,7 +845,7 @@ function buildOverlays() {
     // Whenever it takes clicks, a fully solid overlay would count as a window covering the whole
     // screen, and browsers under it would hide their page (and its controls). A hair of
     // see-through keeps them showing.
-    win.setOpacity(OVERLAY_OPACITY);
+    win.setOpacity(frameQuiet ? 0 : OVERLAY_OPACITY);
     win.loadFile(path.join(__dirname, 'renderer', 'frame.html'));
     win.webContents.once('did-finish-load', () => {
       win.setBounds(area); // Windows can size it wrongly on screens with different scaling
@@ -984,8 +996,6 @@ function fadeTo(win, to, ms = 200) {
 // A run keeps our windows still. Whatever is over the frame fades out once and stays out until
 // the run is over (Keep going counts as one run); everything else doesn't change at all.
 let frameQuiet = false;
-let frameBack = null;
-let runEnded = 0;
 const steady = { on: false, out: new Set() };
 
 /** Windows over the frame fade out once, and let clicks through until the run is over. */
@@ -1001,18 +1011,20 @@ async function stepOut(wins) {
 }
 
 /** The run is over: anything that stepped out comes back. */
-function letGo() {
+async function letGo() {
   steady.on = false;
+  const restoring = [];
   for (const win of steady.out) {
     if (win.isDestroyed()) continue;
     win.setIgnoreMouseEvents(false);
-    fadeTo(win, 1, 320);
+    restoring.push(fadeTo(win, 1, 320));
   }
   steady.out.clear();
   if (frameQuiet) {
     frameQuiet = false;
-    for (const win of overlays) fadeTo(win, OVERLAY_OPACITY, 340);
+    for (const win of overlays) restoring.push(fadeTo(win, OVERLAY_OPACITY, 340));
   }
+  await Promise.all(restoring);
 }
 
 /** A picture taken during a run, with our own windows that are still showing painted out of it. */
@@ -1044,20 +1056,9 @@ function coverOurs(image, areaDip) {
 }
 
 async function quietFrame() {
-  clearTimeout(frameBack);
   frameQuiet = true;
   await Promise.all([...overlays].map((win) => fadeTo(win, 0, 260)));
   await wait(60);
-}
-
-function frameReturns(delay = 700) {
-  clearTimeout(frameBack);
-  frameBack = setTimeout(() => {
-    if (filling || picking) return;
-    // The next question of a Keep going run is being answered, or about to be.
-    if (chain && (running || Date.now() - runEnded < 2500)) return frameReturns(delay);
-    letGo();
-  }, delay);
 }
 
 /** Capture the frame. Any of our windows in the way fade aside for a moment. */
@@ -1244,8 +1245,9 @@ async function writeAnswer({ build = () => conversation, think = settings.answer
 }
 
 /** Runs only when the user presses Answer (or the shortcut). Nothing is read before that. */
+let capturingQuestion = false;
 async function ask({ chained = false } = {}) {
-  if (!widget || running || filling || picking) return;
+  if (!widget || running || filling || picking || capturingQuestion || (!chained && steady.on)) return false;
   if (!chained) chain = null; // answering by hand ends a Keep going run
   showWidget();
   if (selecting) endSelect(null);
@@ -1254,13 +1256,17 @@ async function ask({ chained = false } = {}) {
     return;
   }
   let image;
+  capturingQuestion = true;
   try {
     image = await captureFrame();
   } catch (error) {
     tell('answer:start', null);
     tell('answer:error', error.message);
     return;
+  } finally {
+    capturingQuestion = false;
   }
+  if (chained && !chain) return false;
   const size = image.getSize();
   const full = image.toJPEG(88);
   const thumb = image.resize({ width: Math.min(240, size.width) }).toJPEG(75).toString('base64');
@@ -1284,8 +1290,8 @@ async function ask({ chained = false } = {}) {
   const reply = await writeAnswer()
     .catch(() => null)
     .finally(() => chained && releaseEscape());
-  if (!reply) chain = null;
-  else if (settings.steps.on || chained) runSteps({ chained });
+  if (reply && (chained ? chain : settings.steps.on)) return runSteps({ chained });
+  return false;
 }
 
 async function sendAfter(message, channel, payload, options) {
@@ -3468,22 +3474,21 @@ function releaseEscape() {
   escapeHeld = false;
 }
 
-async function automate(kind, job) {
-  if (filling || running || picking) return;
+async function automate(kind, job, hasNext = () => false) {
   const controller = new AbortController();
   filling = controller;
-  input.warmUp();
-  tell('auto:state', { on: true, kind });
-  holdEscape(controller);
-  for (const win of overlays) win.setIgnoreMouseEvents(true);
-  clearTimeout(frameBack);
-  steady.on = true;
-  // The frame only has to go if its shade would darken a look outside it.
-  const looksOutside = kind === 'steps' && settings.frameStyle.shade && settings.steps.list.some((s) => s.type === 'click' || (s.type === 'find' && s.where === 'screen'));
-  if (looksOutside && !frameQuiet) await quietFrame();
   let error = null;
   let result = null;
+  let next = false;
   try {
+    input.warmUp();
+    tell('auto:state', { on: true, kind });
+    holdEscape(controller);
+    for (const win of overlays) win.setIgnoreMouseEvents(true);
+    steady.on = true;
+    // The shade is only in the way when a block looks outside the frame.
+    const looksOutside = kind === 'steps' && settings.frameStyle.shade && settings.steps.list.some((s) => s.type === 'click' || (s.type === 'find' && s.where === 'screen'));
+    if (looksOutside && !frameQuiet) await quietFrame();
     result = await job(controller, (index) => tell('auto:state', { on: true, kind, index }));
   } catch (caught) {
     if (caught.code !== 'aborted' && !controller.signal.aborted) {
@@ -3492,18 +3497,22 @@ async function automate(kind, job) {
   } finally {
     releaseEscape();
     for (const win of overlays) if (!win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: true });
+    next = !error && !controller.signal.aborted && hasNext();
+    if (!next) {
+      chain = null;
+      await letGo();
+    }
     filling = null;
-    runEnded = Date.now();
-    tell('auto:state', { on: false, kind, error, result, stopped: controller.signal.aborted, next: !!chain && !error && !controller.signal.aborted });
+    tell('auto:state', { on: false, kind, error, result, stopped: controller.signal.aborted, next });
     raiseFloating();
-    frameReturns();
   }
+  return next;
 }
 
 /** The Fill in button: runs your blocks when you have some, or just fills in the answer. */
 function fillIn() {
   const answer = latestAnswer();
-  if (!answer || !settings.frameVisible) return;
+  if (!answer || !settings.frameVisible || filling || running || picking || capturingQuestion || steady.on) return;
   if (settings.steps.list.length) return runSteps();
   automate('fill', (controller) => fillCore(answer, controller));
 }
@@ -4400,11 +4409,10 @@ let chain = null; // { left, total, done } while Keep going answers question aft
 
 function runSteps({ chained = false } = {}) {
   const list = settings.steps.list;
-  if (!list.length) return;
+  if (!list.length || filling || running || picking || capturingQuestion || (!chained && steady.on)) return false;
   if (!chained) chain = null;
   const startedAt = screen.getCursorScreenPoint();
   let nextQuestion = false;
-  let finished = false;
   automate('steps', async (controller, report) => {
     const run = { list, report, answer: latestAnswer(), signal: controller.signal, startedAt, lastChange: null, baseline: null };
     if (list.some((s) => s.type === 'verify')) run.baseline = await readBaseline(feedbackArea());
@@ -4433,16 +4441,21 @@ function runSteps({ chained = false } = {}) {
       }
       await pause(150, controller.signal);
     }
-    finished = true;
     return list.length;
-  }).then(() => {
-    if (!finished || !nextQuestion || !chain) {
-      if (!finished) chain = null;
-      return;
-    }
+  }, () => nextQuestion && !!chain).then(async (next) => {
+    if (!next) return;
     tell('toast', `Next question (${chain.done} of ${chain.total})`);
-    ask({ chained: true });
+    const continued = await ask({ chained: true }).catch((error) => {
+      tell('answer:error', error.message);
+      return false;
+    });
+    if (continued) return;
+    chain = null;
+    await letGo();
+    tell('auto:state', { on: false, kind: 'steps', next: false });
+    raiseFloating();
   });
+  return true;
 }
 
 // ---------- picking a spot on screen ----------
@@ -4458,7 +4471,6 @@ function startPick() {
   return new Promise((resolve) => {
     picking = { resolve };
     clearTimeout(hideTimer);
-    clearTimeout(frameBack);
     letGo();
     showOverlays();
     for (const win of overlays) {
@@ -4671,6 +4683,7 @@ function registerIpc() {
   ipcMain.on('followup', (event, question) => fromWidget(event) && followUp(question));
   ipcMain.on('stop', (event) => {
     if (!fromWidget(event)) return;
+    chain = null;
     if (running) running.abort();
     if (filling) filling.abort();
   });
@@ -4681,7 +4694,7 @@ function registerIpc() {
     saveSettings();
     return settings.steps;
   });
-  ipcMain.handle('steps:pick', (event, kind) => (fromWidget(event) && !filling ? pickSpot(String(kind)) : null));
+  ipcMain.handle('steps:pick', (event, kind) => (fromWidget(event) && !filling && !steady.on ? pickSpot(String(kind)) : null));
   ipcMain.on('steps:run', (event) => fromWidget(event) && runSteps());
   ipcMain.handle('model:download', (event, providerId, model) => {
     if (!fromWidget(event) || !PROVIDERS[providerId]) return { ok: false, error: 'Unknown provider.' };
